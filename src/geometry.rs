@@ -6,7 +6,7 @@ use zorder::{
     coord_of, index_of,
 };
 
-#[derive(Debug, Clone, PartialEq, PartialOrd, float_derive::FloatHash)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct PointF {
     pub x: f32,
     pub y: f32,
@@ -51,13 +51,16 @@ pub struct ZOrder {
     token: Option<HardwareSupportToken>,
 }
 
-impl ZOrder {
+impl Default for ZOrder {
     #[inline]
-    pub fn new() -> Self {
+    fn default() -> Self {
         Self {
             token: HardwareSupportToken::new(),
         }
     }
+}
+
+impl ZOrder {
     #[inline]
     pub fn coord_of<I, const N: usize>(&self, index: I) -> [<I as Deinterleave<N>>::Output; N]
     where

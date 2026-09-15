@@ -1,6 +1,6 @@
 use crate::{
+    Voxelizer,
     geometry::{PointF, PointI, ZOrder},
-    voxelizer::Voxelizer,
 };
 
 const BITS_FOR_ZORDER: u32 = 4;
@@ -10,7 +10,7 @@ type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
 
 #[derive(Debug, Clone)]
-struct SingleThreaded {
+pub struct SingleThreaded {
     voxels: hashbrown::HashMap<ThreeDim, [i32; 2_usize.pow(3 * BITS_FOR_ZORDER)]>,
     compressed_voxels: hashbrown::HashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_ZORDER)]>,
     result: hashbrown::HashMap<PagedIndex, i32>,
@@ -20,13 +20,13 @@ struct SingleThreaded {
 
 impl SingleThreaded {
     #[inline]
-    pub(crate) fn new(resolution: f32) -> Self {
+    pub fn new(resolution: f32) -> Self {
         Self {
             voxels: hashbrown::HashMap::new(),
             compressed_voxels: hashbrown::HashMap::new(),
             result: hashbrown::HashMap::new(),
             resolution,
-            zorder: ZOrder::new(),
+            zorder: ZOrder::default(),
         }
     }
 }
@@ -129,11 +129,11 @@ impl SingleThreaded {
             z: point.z.floor() as i32,
             i: point.i as i32,
         };
-        let dir_x = (target_point.x as i32 - sensor_pos.x).signum();
-        let dir_y = (target_point.y as i32 - sensor_pos.y).signum();
-        let dir_z = (target_point.z as i32 - sensor_pos.z).signum();
+        let dir_x = (target_point.x - sensor_pos.x).signum();
+        let dir_y = (target_point.y - sensor_pos.y).signum();
+        let dir_z = (target_point.z - sensor_pos.z).signum();
         sensor_pos.i = target_point.i;
-        point -= &sensor_pos_divided;
+        point -= sensor_pos_divided;
         use std::cmp::Ordering;
         match (dir_x.cmp(&0), dir_y.cmp(&0), dir_z.cmp(&0)) {
             (Ordering::Equal, Ordering::Equal, Ordering::Equal) => (),
@@ -249,8 +249,9 @@ impl SingleThreaded {
 mod test {
     use super::BITS_FOR_ZORDER;
     use crate::{
+        Voxelizer,
         geometry::{PointF, PointI},
-        voxelizer::{Voxelizer, single_threaded::SingleThreaded},
+        single_threaded::SingleThreaded,
     };
 
     const PAGE_LEN: usize = 2_usize.pow(3 * BITS_FOR_ZORDER);

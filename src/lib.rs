@@ -1,30 +1,17 @@
-use crate::{
-    geometry::{PointF, PointI},
-    storage::Storage,
-    voxelizer::Voxelizer,
-};
+use crate::geometry::{PointF, PointI};
 
 mod bindings;
-mod geometry;
-mod storage;
-mod voxelizer;
+pub mod geometry;
+#[cfg(feature = "multi_threaded")]
+mod multi_threaded;
+#[cfg(feature = "single_threaded")]
+mod single_threaded;
+#[cfg(feature = "wgpu")]
+mod wgpu;
 
-pub struct Context {
-    voxelizer: Box<dyn Voxelizer>,
-    voxels: Box<dyn Storage>,
-    last_update: Option<Vec<PointI>>,
-}
+#[cfg(feature = "single_threaded")]
+pub use single_threaded::SingleThreaded;
 
-impl Context {
-    pub fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) {}
-    #[inline]
-    pub fn last_update(&self) -> Option<&[PointI]> {
-        self.last_update.as_ref().map(|v| v.as_slice())
-    }
-    pub fn last_update_compressed(&self) {}
-    #[inline]
-    pub fn get_voxels(&self) -> Vec<PointI> {
-        self.voxels.iter().cloned().collect()
-    }
-    pub fn get_voxels_compressed(&self) {}
+pub trait Voxelizer {
+    fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI>;
 }
