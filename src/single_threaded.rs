@@ -65,7 +65,7 @@ impl Voxelizer for SingleThreaded {
             .iter()
             .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
         let mut result = Vec::new();
-        let mut map = hashbrown::HashMap::new();
+        let mut map = HashMap::new();
         let mut compressed_dedup = HashMap::new();
         std::mem::swap(&mut map, &mut self.result);
         for (idx, prev) in map.drain() {

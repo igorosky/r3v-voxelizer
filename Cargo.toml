@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dashboard = { version = "0.1.0", optional = true }
+dashmap = { version = "6.2.1", optional = true }
 hashbrown = { version = "0.17.1", optional = true }
 rayon = { version = "1.12.0", optional = true }
 wgpu = { version = "30.0.1", optional = true }
@@ -12,7 +12,6 @@ zorder = { version = "0.2.2", optional = true }
 
 [features]
 default = ["single_threaded"]
-all = ["multi_threaded", "single_threaded", "wgpu"]
-multi_threaded = ["dep:rayon", "dep:dashboard", "dep:zorder"]
+multi_threaded = ["dep:rayon", "dep:dashmap", "dep:zorder"]
 single_threaded = ["dep:hashbrown", "dep:zorder"]
 wgpu = ["dep:wgpu"]

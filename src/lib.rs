@@ -9,6 +9,8 @@ mod single_threaded;
 #[cfg(feature = "wgpu")]
 mod wgpu;
 
+#[cfg(feature = "multi_threaded")]
+pub use multi_threaded::MultithreadedThreaded;
 #[cfg(feature = "single_threaded")]
 pub use single_threaded::SingleThreaded;
 
