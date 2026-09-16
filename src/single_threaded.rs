@@ -66,78 +66,81 @@ impl Voxelizer for SingleThreaded {
             .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
         let mut result = Vec::new();
         let mut map = HashMap::new();
-        let mut compressed_dedup = HashMap::new();
         std::mem::swap(&mut map, &mut self.result);
-        for (idx, prev) in map.drain() {
-            let voxel = self
-                .voxels
-                .get(&idx.0)
-                .expect("This voxel was touched - it must exist")[idx.1];
-            if voxel != prev {
-                if let Some(compressed_voxels) = self.compressed_voxels.as_mut() {
-                    let [x, y, z] = self.zorder.coord_of(idx.1 as u64);
-                    let idx2 = || {
-                        self.zorder.index_of([
-                            (idx.0.0 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
-                            (idx.0.1 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
-                            (idx.0.2 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
-                        ]) as usize
-                    };
-                    let mut changed = |v: u64| {
-                        let upper_bits = z as i32 & 2;
-                        debug_assert!(upper_bits & !2 == 0);
-                        compressed_dedup.insert(
-                            (
-                                idx.0.0 << BITS_FOR_ZORDER,
-                                idx.0.1 << BITS_FOR_ZORDER,
-                                (idx.0.2 << BITS_FOR_ZORDER) | upper_bits,
-                            ),
-                            if upper_bits != 0 {
-                                (v >> 32) as u32
-                            } else {
-                                v as u32
-                            },
-                        );
-                    };
-                    let idx = || {
+        let iter = map
+            .drain()
+            .map(|(idx, prev)| {
+                (
+                    idx,
+                    prev,
+                    self.voxels
+                        .get(&idx.0)
+                        .expect("This voxel was touched - it must exist")[idx.1],
+                )
+            })
+            .filter(|(_, prev, voxel)| voxel != prev);
+        if let Some(compressed_voxels) = self.compressed_voxels.as_mut() {
+            let mut compressed_dedup = HashMap::new();
+            for (idx, prev, voxel) in iter {
+                let [x, y, z] = self.zorder.coord_of(idx.1 as u64);
+                let idx2 = || {
+                    self.zorder.index_of([
+                        (idx.0.0 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
+                        (idx.0.1 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
+                        (idx.0.2 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
+                    ]) as usize
+                };
+                let mut changed = |v| {
+                    let upper_bits = z as i32 & 2;
+                    debug_assert!(upper_bits & !2 == 0);
+                    compressed_dedup.insert(
                         (
-                            idx.0.0 >> BITS_FOR_COMPRESSED_ZORDER,
-                            idx.0.1 >> BITS_FOR_COMPRESSED_ZORDER,
-                            idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
-                        )
-                    };
-                    if prev < self.construct_threshold && voxel >= self.construct_threshold {
-                        let v =
-                            &mut compressed_voxels.entry(idx()).or_insert_with(|| [0; _])[idx2()];
-                        *v |= 1 << x << (y << 2) << (z << 4);
-                        changed(*v);
-                    } else if prev > self.destroy_threshold && voxel <= self.destroy_threshold {
-                        debug_assert!(
-                            compressed_voxels
-                                .get_mut(&idx())
-                                .expect("It must have existed if it is destroyed")[idx2()]
-                                & (1 << x << (y << 2) << (z << 4))
-                                != 0
-                        );
-                        let v = &mut compressed_voxels
+                            idx.0.0 << BITS_FOR_ZORDER,
+                            idx.0.1 << BITS_FOR_ZORDER,
+                            (idx.0.2 << BITS_FOR_ZORDER) | upper_bits,
+                        ),
+                        if upper_bits != 0 {
+                            (v >> 32) as u32
+                        } else {
+                            v as u32
+                        },
+                    );
+                };
+                let idx = || {
+                    (
+                        idx.0.0 >> BITS_FOR_COMPRESSED_ZORDER,
+                        idx.0.1 >> BITS_FOR_COMPRESSED_ZORDER,
+                        idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
+                    )
+                };
+                if prev < self.construct_threshold && voxel >= self.construct_threshold {
+                    let v = &mut compressed_voxels.entry(idx()).or_insert_with(|| [0; _])[idx2()];
+                    *v |= 1 << x << (y << 2) << (z << 4);
+                    changed(*v);
+                } else if prev > self.destroy_threshold && voxel <= self.destroy_threshold {
+                    debug_assert!(
+                        compressed_voxels
                             .get_mut(&idx())
-                            .expect("It must have existed if it is destroyed")[idx2()];
-                        *v ^= 1 << x << (y << 2) << (z << 4);
-                        changed(*v);
-                    }
-                } else {
-                    result.push(self.point_from_index(idx, voxel));
+                            .expect("It must have existed if it is destroyed")[idx2()]
+                            & (1 << x << (y << 2) << (z << 4))
+                            != 0
+                    );
+                    let v = &mut compressed_voxels
+                        .get_mut(&idx())
+                        .expect("It must have existed if it is destroyed")[idx2()];
+                    *v ^= 1 << x << (y << 2) << (z << 4);
+                    changed(*v);
                 }
             }
-        }
-        std::mem::swap(&mut map, &mut self.result);
-        if self.compressed_voxels.is_some() {
             result.extend(
                 compressed_dedup
                     .into_iter()
                     .map(|((x, y, z), i)| PointI { x, y, z, i }),
             );
+        } else {
+            result.extend(iter.map(|(idx, _, voxel)| self.point_from_index(idx, voxel)));
         }
+        std::mem::swap(&mut map, &mut self.result);
         result
     }
 }
