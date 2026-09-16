@@ -6,6 +6,8 @@ pub mod geometry;
 mod multi_threaded;
 #[cfg(feature = "single_threaded")]
 mod single_threaded;
+#[cfg(test)]
+mod test;
 #[cfg(feature = "wgpu")]
 mod wgpu;
 

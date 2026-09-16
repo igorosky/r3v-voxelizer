@@ -329,3 +329,259 @@ impl MultithreadedThreaded {
         self.add_voxel(&sensor_pos);
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::{
+        BITS_FOR_COMPRESSED_ZORDER, BITS_FOR_COMPRESSED_ZORDER_MASK, BITS_FOR_ZORDER,
+        MultithreadedThreaded, PAGE_SIZE,
+    };
+    use crate::{
+        Voxelizer,
+        geometry::PointI,
+        test::{
+            Coord, PAGE_LEN, PagedIndex, SCENARIO_PARAMS, TestVoxelizer, assert_snapshot_eq,
+            compressed_bits, compressed_word, cube_faces, get_voxel, nonzero_voxels, page_bit, pf,
+            pi, scenario, seed, sorted, with_i,
+        },
+    };
+
+    /// Thread count used by the shared suite.
+    const THREADS: usize = 4;
+
+    fn new(
+        resolution: f32,
+        hit_multiplayer: u32,
+        target_multiplayer: u32,
+        destroy_threshold: u32,
+        construct_threshold: u32,
+        compress: bool,
+        thread_count: usize,
+    ) -> MultithreadedThreaded {
+        MultithreadedThreaded::new(
+            resolution,
+            hit_multiplayer,
+            target_multiplayer,
+            destroy_threshold,
+            construct_threshold,
+            compress,
+            thread_count,
+        )
+        .expect("thread pool must build")
+    }
+
+    impl TestVoxelizer for MultithreadedThreaded {
+        const BITS_FOR_ZORDER: u32 = BITS_FOR_ZORDER;
+        const BITS_FOR_COMPRESSED_ZORDER: u32 = BITS_FOR_COMPRESSED_ZORDER;
+        const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = BITS_FOR_COMPRESSED_ZORDER_MASK;
+        const PAGE_SIZE: u32 = PAGE_SIZE;
+        fn make(
+            resolution: f32,
+            hit_multiplayer: u32,
+            target_multiplayer: u32,
+            destroy_threshold: u32,
+            construct_threshold: u32,
+            compress: bool,
+        ) -> Self {
+            new(
+                resolution,
+                hit_multiplayer,
+                target_multiplayer,
+                destroy_threshold,
+                construct_threshold,
+                compress,
+                THREADS,
+            )
+        }
+        fn get_index(&self, point: &PointI) -> PagedIndex {
+            MultithreadedThreaded::get_index(self, point)
+        }
+        fn point_from_index(&self, idx: PagedIndex, i: u32) -> PointI {
+            MultithreadedThreaded::point_from_index(self, idx, i)
+        }
+        fn closest_boundary(upper: bool, position: f32, len: f32) -> f32 {
+            MultithreadedThreaded::closest_boundary(upper, position, len)
+        }
+        fn set_voxel(&mut self, x: i32, y: i32, z: i32, value: u32) {
+            let idx = MultithreadedThreaded::get_index(self, &pi(x, y, z, 0));
+            self.voxels.entry(idx.0).or_insert_with(|| [0; PAGE_LEN])[idx.1] = value;
+        }
+        fn pages(&self) -> Vec<(Coord, [u32; PAGE_LEN])> {
+            let mut out: Vec<_> = self.voxels.iter().map(|r| (*r.key(), *r.value())).collect();
+            out.sort_by_key(|(k, _)| *k);
+            out
+        }
+        fn compressed_pages(&self) -> Option<Vec<(Coord, Vec<u64>)>> {
+            let mut out: Vec<_> = self
+                .compressed_voxels
+                .as_ref()?
+                .iter()
+                .map(|r| (*r.key(), r.value().to_vec()))
+                .collect();
+            out.sort_by_key(|(k, _)| *k);
+            Some(out)
+        }
+        fn pending_results(&self) -> usize {
+            self.result.len()
+        }
+    }
+
+    crate::test::shared_tests!(MultithreadedThreaded);
+
+    // ------------------------------------------------------------ constructor
+
+    #[test]
+    fn new_stores_parameters() {
+        let v = new(0.5, 2, 3, 4, 5, false, 3);
+        assert_eq!(v.resolution, 0.5);
+        assert_eq!(v.hit_multiplayer, 2);
+        assert_eq!(v.target_multiplayer, 3);
+        assert_eq!(v.destroy_threshold, 4);
+        assert_eq!(v.construct_threshold, 5);
+        assert_eq!(v.thread_pool.current_num_threads(), 3);
+        assert!(v.voxels.is_empty());
+        assert!(v.result.is_empty());
+        let v = new(1.0, 1, 1, 0, 1, false, 1);
+        assert_eq!(v.thread_pool.current_num_threads(), 1);
+    }
+
+    #[test]
+    fn new_thread_count_zero_uses_default() {
+        let v = MultithreadedThreaded::new(1.0, 1, 1, 0, 1, false, 0).expect("0 means default");
+        assert!(v.thread_pool.current_num_threads() >= 1);
+    }
+
+    #[test]
+    fn new_compress_flag() {
+        assert!(new(1.0, 1, 1, 0, 1, false, 1).compressed_voxels.is_none());
+        let v = new(1.0, 1, 1, 0, 1, true, 1);
+        assert!(v.compressed_voxels.as_ref().is_some_and(|m| m.is_empty()));
+    }
+
+    // ------------------------------------------------------------ concurrency
+
+    #[test]
+    fn same_result_for_any_thread_count() {
+        for (destroy, construct, compress) in SCENARIO_PARAMS {
+            let expected = scenario(new(1.0, 1, 1, destroy, construct, compress, 1));
+            assert!(expected.results.iter().all(|r| !r.is_empty()));
+            for threads in [2, 4, 8, 16] {
+                let got = scenario(new(1.0, 1, 1, destroy, construct, compress, threads));
+                assert_snapshot_eq(
+                    &got,
+                    &expected,
+                    &format!("compress = {compress}, threads = {threads}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_same_target() {
+        // Every thread adds to the same target and subtracts from the same
+        // three voxels on the way: no update may get lost and the result
+        // must hold the final values once.
+        const N: u32 = 10_000;
+        let mut v = new(1.0, 1, 1, 0, 1, false, 8);
+        let hits = [(0, 0, 0), (1, 0, 0), (2, 0, 0)];
+        seed(&mut v, &hits, 2 * N);
+        let points = vec![pf(3.5, 0.5, 0.5, 1.0); N as usize];
+        let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+        let mut expected = with_i(&hits, N);
+        expected.push(pi(3, 0, 0, N));
+        let expected = sorted(expected);
+        assert_eq!(sorted(result), expected);
+        assert_eq!(nonzero_voxels(&v), expected);
+        assert_eq!(v.pending_results(), 0);
+    }
+
+    #[test]
+    fn concurrent_distinct_pages() {
+        // Targets 8 apart on the faces of a cube: each in its own fine page,
+        // none on the path of another ray from the origin.
+        let mut v = new(1.0, 1, 1, 0, 1, false, 8);
+        let targets = cube_faces(40, 32, 8);
+        let intensity = |n: usize| (1 + n % 7) as u32;
+        let points: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(n, &(x, y, z))| {
+                pf(
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    z as f32 + 0.5,
+                    intensity(n) as f32,
+                )
+            })
+            .collect();
+        let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+        let expected = sorted(
+            targets
+                .iter()
+                .enumerate()
+                .map(|(n, &(x, y, z))| pi(x, y, z, intensity(n)))
+                .collect(),
+        );
+        assert_eq!(sorted(result), expected);
+        assert_eq!(nonzero_voxels(&v), expected);
+        // Only the targets' pages exist: nothing else got written.
+        assert_eq!(v.pages().len(), targets.len());
+        assert_eq!(v.pending_results(), 0);
+    }
+
+    #[test]
+    fn concurrent_compress_fills_block() {
+        // From high above every ray enters the z = 1 layer already inside its
+        // target column, so no target lies on another ray's path. 16 voxels
+        // per block, each sent twice, must merge into one entry per block.
+        let mut v = new(1.0, 1, 1, 0, 1, true, 8);
+        let blocks = [(0, 0), (4, 4)];
+        let mut points = Vec::new();
+        let mut voxels = Vec::new();
+        for (bx, by) in blocks {
+            for x in 0..4 {
+                for y in 0..4 {
+                    let p = pf((bx + x) as f32 + 0.5, (by + y) as f32 + 0.5, 1.5, 1.0);
+                    points.push(p.clone());
+                    points.push(p);
+                    voxels.push((bx + x, by + y, 1));
+                }
+            }
+        }
+        let result = v.add_points(pf(1.5, 1.5, 20.5, 1.0), &points);
+        // Whole z = 1 layer of a block: bits 16..32 of the low word half.
+        const LAYER: u32 = 0xFFFF_0000;
+        assert_eq!(sorted(result), vec![pi(0, 0, 0, LAYER), pi(4, 4, 0, LAYER)]);
+        assert_eq!(compressed_word(&v, 0, 0, 1), Some(LAYER as u64));
+        assert_eq!(compressed_word(&v, 4, 4, 1), Some(LAYER as u64));
+        assert_eq!(compressed_bits(&v), sorted(with_i(&voxels, 1)));
+        assert_eq!(nonzero_voxels(&v), sorted(with_i(&voxels, 2)));
+        assert_eq!(v.pages().len(), 2);
+    }
+
+    #[test]
+    fn compress_net_zero_within_call_consistent() {
+        // Same input as the sequential `compress_net_zero_within_call`: ray 1
+        // constructs (1,0,0), ray 2 passes through it into (2,0,0). Whether
+        // the hit lands before the add (or before the page even exists) or
+        // after it depends on scheduling, so both outcomes are valid, but the
+        // reported block must match the stored state either way.
+        let mut v = new(1.0, 1, 1, 0, 1, true, 4);
+        let result = v.add_points(
+            pf(0.5, 0.5, 0.5, 1.0),
+            &[pf(1.5, 0.5, 0.5, 1.0), pf(2.5, 0.5, 0.5, 1.0)],
+        );
+        assert_eq!(get_voxel(&v, 2, 0, 0), Some(1));
+        let one = get_voxel(&v, 1, 0, 0).expect("page exists");
+        assert!(one <= 1, "(1,0,0) = {one}");
+        let mut word = page_bit(2, 0, 0);
+        let mut bits = vec![pi(2, 0, 0, 1)];
+        if one == 1 {
+            word |= page_bit(1, 0, 0);
+            bits.push(pi(1, 0, 0, 1));
+        }
+        assert_eq!(compressed_word(&v, 0, 0, 0), Some(word));
+        assert_eq!(compressed_bits(&v), sorted(bits));
+        assert_eq!(result, vec![pi(0, 0, 0, word as u32)]);
+    }
+}
