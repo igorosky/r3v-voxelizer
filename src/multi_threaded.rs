@@ -192,7 +192,17 @@ impl MultithreadedThreaded {
         let idx = self.get_index(point);
         // If voxel is not hit it does not exists anyway
         if let Some(mut v) = self.voxels.get_mut(&idx.0) {
-            self.result.entry(idx).or_insert(v[idx.1]);
+            use dashmap::Entry;
+            match self.result.entry(idx) {
+                Entry::Occupied(mut occupied_entry) => {
+                    if *occupied_entry.get() < v[idx.1] {
+                        *occupied_entry.get_mut() = v[idx.1];
+                    }
+                }
+                Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(v[idx.1]);
+                }
+            }
             v[idx.1] = v[idx.1].saturating_sub(point.i * self.hit_multiplayer);
         }
     }

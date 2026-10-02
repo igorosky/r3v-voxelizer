@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytemuck = { version = "1.25.2", optional = true }
 dashmap = { version = "6.2.1", optional = true }
 hashbrown = { version = "0.17.1", optional = true }
 pollster = { version = "1.0.1", optional = true }
@@ -15,4 +16,4 @@ zorder = { version = "0.2.2", optional = true }
 default = ["single_threaded"]
 multi_threaded = ["dep:rayon", "dep:dashmap", "dep:zorder"]
 single_threaded = ["dep:hashbrown", "dep:zorder"]
-wgpu = ["dep:wgpu", "dep:pollster"]
+wgpu = ["dep:wgpu", "dep:bytemuck"]
