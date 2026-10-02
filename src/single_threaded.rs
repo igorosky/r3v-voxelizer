@@ -195,7 +195,7 @@ impl SingleThreaded {
         // If voxel is not hit it does not exists anyway
         if let Some(v) = self.voxels.get_mut(&idx.0) {
             self.result.entry(idx).or_insert(v[idx.1]);
-            v[idx.1] = v[idx.1].saturating_sub(point.i * self.hit_multiplayer);
+            v[idx.1] = v[idx.1].saturating_sub(point.i);
         }
     }
     #[inline]
@@ -219,7 +219,7 @@ impl SingleThreaded {
             x: point.x.floor() as i32,
             y: point.y.floor() as i32,
             z: point.z.floor() as i32,
-            i: point.i as u32,
+            i: point.i as u32 * self.hit_multiplayer,
         };
         let dir_x = (target_point.x - sensor_pos.x).signum();
         let dir_y = (target_point.y - sensor_pos.y).signum();
