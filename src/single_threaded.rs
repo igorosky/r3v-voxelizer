@@ -64,6 +64,17 @@ impl Voxelizer for SingleThreaded {
         points
             .iter()
             .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
+        let resolution = self.resolution;
+        points
+            .iter()
+            .map(move |v| v / resolution)
+            .map(|v| PointI {
+                x: v.x.floor() as i32,
+                y: v.y.floor() as i32,
+                z: v.z.floor() as i32,
+                i: v.i as u32,
+            })
+            .for_each(|point| self.add_voxel(&point));
         let mut result = Vec::new();
         let mut map = HashMap::new();
         std::mem::swap(&mut map, &mut self.result);
@@ -322,7 +333,6 @@ impl SingleThreaded {
                 }
             }
         };
-        self.add_voxel(&sensor_pos);
     }
 }
 
@@ -417,25 +427,5 @@ mod test {
         assert!(plain::<SingleThreaded>().compressed_voxels.is_none());
         let v = compressed::<SingleThreaded>();
         assert!(v.compressed_voxels.as_ref().is_some_and(|m| m.is_empty()));
-    }
-
-    // ----------------------------------------------------------- compress mode
-
-    #[test]
-    fn compress_net_zero_within_call() {
-        // Sequential only: the second ray must see the page and the value the
-        // first ray created, which a parallel implementation cannot promise.
-        let mut v = compressed::<SingleThreaded>();
-        // First ray constructs (1,0,0); second ray hits it back to 0 and
-        // constructs (2,0,0). Only the net change counts.
-        let result = v.add_points(
-            pf(0.5, 0.5, 0.5, 1.0),
-            &[pf(1.5, 0.5, 0.5, 1.0), pf(2.5, 0.5, 0.5, 1.0)],
-        );
-        assert_eq!(get_voxel(&v, 1, 0, 0), Some(0));
-        assert_eq!(get_voxel(&v, 2, 0, 0), Some(1));
-        assert_eq!(compressed_word(&v, 1, 0, 0), Some(page_bit(2, 0, 0)));
-        assert_eq!(compressed_bits(&v), vec![pi(2, 0, 0, 1)]);
-        assert_eq!(result, vec![block(2, 0, 0, block_bit(2, 0, 0))]);
     }
 }

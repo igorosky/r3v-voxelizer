@@ -1,4 +1,4 @@
-use std::ops::{DivAssign, SubAssign};
+use std::ops::{Div, DivAssign, SubAssign};
 
 use zorder::{
     Deinterleave, Interleave,
@@ -26,6 +26,19 @@ impl SubAssign<&Self> for PointF {
         self.x -= rhs.x;
         self.y -= rhs.y;
         self.z -= rhs.z;
+    }
+}
+
+impl Div<f32> for &PointF {
+    type Output = PointF;
+
+    fn div(self, rhs: f32) -> Self::Output {
+        PointF {
+            x: self.x / rhs,
+            y: self.y / rhs,
+            z: self.z / rhs,
+            i: self.i,
+        }
     }
 }
 

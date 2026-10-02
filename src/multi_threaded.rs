@@ -72,6 +72,17 @@ impl Voxelizer for MultithreadedThreaded {
             points
                 .par_iter()
                 .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
+            let resolution = self.resolution;
+            points
+                .par_iter()
+                .map(move |v| v / resolution)
+                .map(|v| PointI {
+                    x: v.x.floor() as i32,
+                    y: v.y.floor() as i32,
+                    z: v.z.floor() as i32,
+                    i: v.i as u32,
+                })
+                .for_each(|point| self.add_voxel(&point));
         });
         let map = std::mem::replace(&mut self.result, DashMap::new());
         self.thread_pool.install(|| {
@@ -336,7 +347,6 @@ impl MultithreadedThreaded {
                 }
             }
         };
-        self.add_voxel(&sensor_pos);
     }
 }
 
