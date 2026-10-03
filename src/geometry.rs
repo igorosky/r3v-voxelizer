@@ -1,5 +1,6 @@
 use std::ops::{Div, DivAssign, SubAssign};
 
+#[cfg_attr(feature = "js", wasm_bindgen::prelude::wasm_bindgen)]
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(from_py_object, module = "r3v_voxelizer")
@@ -50,6 +51,7 @@ impl DivAssign<f32> for PointF {
     }
 }
 
+#[cfg_attr(feature = "js", wasm_bindgen::prelude::wasm_bindgen)]
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(from_py_object, module = "r3v_voxelizer")

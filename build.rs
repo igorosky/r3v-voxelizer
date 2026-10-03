@@ -33,6 +33,12 @@ fn gen_python() {
 fn main() {
     #[cfg(all(any(feature = "c", feature = "cpp"), feature = "python"))]
     compile_error!("Cannot build for C/C++ and Python at the same time");
+    #[cfg(all(feature = "js", feature = "multi_threaded"))]
+    compile_error!("Cannot build for JS with multi_threaded feature");
+    #[cfg(all(feature = "js", feature = "python"))]
+    compile_error!("Cannot build for JS and Python at the same time");
+    #[cfg(all(any(feature = "c", feature = "cpp"), feature = "js"))]
+    compile_error!("Cannot build for C/C++ and JS at the same time");
     #[cfg(feature = "c")]
     gen_c();
     #[cfg(feature = "cpp")]

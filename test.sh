@@ -15,6 +15,8 @@ suites=(
     "python,single_threaded"
     "python,multi_threaded"
     "python,single_threaded,multi_threaded"
+    "js"
+    "js,single_threaded"
 )
 
 echo "Running cargo check for all suites..."

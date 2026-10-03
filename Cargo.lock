@@ -938,11 +938,13 @@ dependencies = [
  "cbindgen",
  "dashmap",
  "hashbrown 0.17.1",
+ "js-sys",
  "libtest-mimic",
  "pollster",
  "pyo3",
  "pyo3-build-config",
  "rayon",
+ "wasm-bindgen",
  "wgpu",
  "zorder",
 ]
