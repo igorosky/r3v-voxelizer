@@ -6,7 +6,6 @@ use zorder::{
     coord_of, index_of,
 };
 
-#[repr(C)]
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct PointF {
     pub x: f32,
@@ -52,7 +51,6 @@ impl DivAssign<f32> for PointF {
     }
 }
 
-#[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PointI {
     pub x: i32,

@@ -19,7 +19,7 @@ type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
 
 #[derive(Debug)]
-pub struct MultiThreaded {
+pub struct MultithreadedThreaded {
     voxels: DashMap<ThreeDim, [u32; 2_usize.pow(3 * BITS_FOR_ZORDER)]>,
     compressed_voxels:
         Option<DashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_COMPRESSED_ZORDER)]>>,
@@ -33,7 +33,7 @@ pub struct MultiThreaded {
     thread_pool: ThreadPool,
 }
 
-impl MultiThreaded {
+impl MultithreadedThreaded {
     #[inline]
     pub fn new(
         resolution: f32,
@@ -59,7 +59,7 @@ impl MultiThreaded {
     }
 }
 
-impl Voxelizer for MultiThreaded {
+impl Voxelizer for MultithreadedThreaded {
     fn add_points(&mut self, mut sensor_pos: PointF, points: &[PointF]) -> Vec<PointI> {
         sensor_pos /= self.resolution;
         let sensor_pos_i = PointI {
@@ -165,7 +165,7 @@ impl Voxelizer for MultiThreaded {
     }
 }
 
-impl MultiThreaded {
+impl MultithreadedThreaded {
     #[inline]
     fn get_index(&self, point: &PointI) -> PagedIndex {
         (
@@ -354,7 +354,7 @@ impl MultiThreaded {
 mod test {
     use super::{
         BITS_FOR_COMPRESSED_ZORDER, BITS_FOR_COMPRESSED_ZORDER_MASK, BITS_FOR_ZORDER,
-        MultiThreaded, PAGE_SIZE,
+        MultithreadedThreaded, PAGE_SIZE,
     };
     use crate::{
         Voxelizer,
@@ -377,8 +377,8 @@ mod test {
         construct_threshold: u32,
         compress: bool,
         thread_count: usize,
-    ) -> MultiThreaded {
-        MultiThreaded::new(
+    ) -> MultithreadedThreaded {
+        MultithreadedThreaded::new(
             resolution,
             hit_multiplayer,
             target_multiplayer,
@@ -390,7 +390,7 @@ mod test {
         .expect("thread pool must build")
     }
 
-    impl TestVoxelizer for MultiThreaded {
+    impl TestVoxelizer for MultithreadedThreaded {
         const BITS_FOR_ZORDER: u32 = BITS_FOR_ZORDER;
         const BITS_FOR_COMPRESSED_ZORDER: u32 = BITS_FOR_COMPRESSED_ZORDER;
         const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = BITS_FOR_COMPRESSED_ZORDER_MASK;
@@ -414,16 +414,16 @@ mod test {
             )
         }
         fn get_index(&self, point: &PointI) -> PagedIndex {
-            MultiThreaded::get_index(self, point)
+            MultithreadedThreaded::get_index(self, point)
         }
         fn point_from_index(&self, idx: PagedIndex, i: u32) -> PointI {
-            MultiThreaded::point_from_index(self, idx, i)
+            MultithreadedThreaded::point_from_index(self, idx, i)
         }
         fn closest_boundary(upper: bool, position: f32, len: f32) -> f32 {
-            MultiThreaded::closest_boundary(upper, position, len)
+            MultithreadedThreaded::closest_boundary(upper, position, len)
         }
         fn set_voxel(&mut self, x: i32, y: i32, z: i32, value: u32) {
-            let idx = MultiThreaded::get_index(self, &pi(x, y, z, 0));
+            let idx = MultithreadedThreaded::get_index(self, &pi(x, y, z, 0));
             self.voxels.entry(idx.0).or_insert_with(|| [0; PAGE_LEN])[idx.1] = value;
         }
         fn pages(&self) -> Vec<(Coord, [u32; PAGE_LEN])> {
@@ -446,7 +446,7 @@ mod test {
         }
     }
 
-    crate::test::shared_tests!(MultiThreaded);
+    crate::test::shared_tests!(MultithreadedThreaded);
 
     // ------------------------------------------------------------ constructor
 
@@ -467,7 +467,7 @@ mod test {
 
     #[test]
     fn new_thread_count_zero_uses_default() {
-        let v = MultiThreaded::new(1.0, 1, 1, 0, 1, false, 0).expect("0 means default");
+        let v = MultithreadedThreaded::new(1.0, 1, 1, 0, 1, false, 0).expect("0 means default");
         assert!(v.thread_pool.current_num_threads() >= 1);
     }
 

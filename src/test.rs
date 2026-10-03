@@ -1310,13 +1310,13 @@ fn cube_faces_self_check() {
 #[cfg(all(feature = "single_threaded", feature = "multi_threaded"))]
 #[test]
 fn single_and_multi_agree() {
-    use crate::{MultiThreaded, SingleThreaded};
+    use crate::{MultithreadedThreaded, SingleThreaded};
     for (destroy, construct, compress) in SCENARIO_PARAMS {
         let expected = scenario(SingleThreaded::new(1.0, 1, 1, destroy, construct, compress));
         assert!(expected.results.iter().all(|r| !r.is_empty()));
         for threads in [1, 2, 4, 8] {
             let got = scenario(
-                MultiThreaded::new(1.0, 1, 1, destroy, construct, compress, threads)
+                MultithreadedThreaded::new(1.0, 1, 1, destroy, construct, compress, threads)
                     .expect("thread pool must build"),
             );
             assert_snapshot_eq(

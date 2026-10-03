@@ -12,11 +12,9 @@ mod test;
 mod wgpu;
 
 #[cfg(feature = "multi_threaded")]
-pub use multi_threaded::MultiThreaded;
+pub use multi_threaded::MultithreadedThreaded;
 #[cfg(feature = "single_threaded")]
 pub use single_threaded::SingleThreaded;
-#[cfg(feature = "wgpu")]
-pub use wgpu::WgpuAccelerated;
 
 pub trait Voxelizer {
     fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI>;
