@@ -20,7 +20,8 @@
 #define SEED 10u
 
 /* One voxelizer type the per implementation tests run against. */
-typedef struct Impl {
+typedef struct Impl
+{
     const char *name;
     bool multi;
     uintptr_t threads;
@@ -28,7 +29,8 @@ typedef struct Impl {
 
 typedef void (*TestFn)(const Impl *impl);
 
-typedef struct TestCase {
+typedef struct TestCase
+{
     const char *name;
     TestFn fn;
     /* Run once per entry of IMPLS when true, once overall otherwise. */
@@ -46,11 +48,13 @@ extern const size_t TEST_CASE_COUNT;
 
 void fail(const char *file, int line, const char *fmt, ...);
 
-#define CHECK(cond)                                         \
-    do {                                                    \
-        if (!(cond)) {                                      \
+#define CHECK(cond)                                              \
+    do                                                           \
+    {                                                            \
+        if (!(cond))                                             \
+        {                                                        \
             fail(__FILE__, __LINE__, "check failed: %s", #cond); \
-        }                                                   \
+        }                                                        \
     } while (0)
 
 /* Sorts both lists, compares them and frees the update. */
@@ -58,7 +62,7 @@ void check_update(VoxelsUpdate update, const PointI *expected, size_t expected_l
                   const char *file, int line);
 
 #define VOXELS(...) ((PointI[]){__VA_ARGS__})
-#define EXPECT_VOXELS(update, ...)                                       \
+#define EXPECT_VOXELS(update, ...)                                              \
     check_update((update), VOXELS(__VA_ARGS__), ARRAY_LEN(VOXELS(__VA_ARGS__)), \
                  __FILE__, __LINE__)
 #define EXPECT_NO_VOXELS(update) check_update((update), NULL, 0, __FILE__, __LINE__)
@@ -69,8 +73,8 @@ PointF pf(float x, float y, float z, float i);
 PointI pi(int32_t x, int32_t y, int32_t z, uint32_t i);
 
 /* Creates a voxelizer of the given type. Fails the test on NULL. */
-void *make(const Impl *impl, float resolution, uint32_t hit_multiplayer,
-           uint32_t target_multiplayer, uint32_t destroy_threshold,
+void *make(const Impl *impl, float resolution, uint32_t hit_multiplier,
+           uint32_t target_multiplier, uint32_t destroy_threshold,
            uint32_t construct_threshold, bool compress);
 /* Resolution 1, multipliers 1, destroy at 0, construct at 1, no compression. */
 void *plain(const Impl *impl);
@@ -80,7 +84,7 @@ void *compressed(const Impl *impl);
 /* add_points for a single point. */
 VoxelsUpdate add_point(void *voxelizer, PointF sensor, PointF point);
 
-/* Adds i * target_multiplayer to voxel (x, y, z) (creating its page) by
+/* Adds i * target_multiplier to voxel (x, y, z) (creating its page) by
  * firing a point that stays inside the sensor voxel, so nothing else gets
  * hit. The update is dropped. */
 void seed(void *voxelizer, float resolution, int32_t x, int32_t y, int32_t z, float i);
@@ -94,7 +98,8 @@ VoxelsUpdate from_above(void *voxelizer, int32_t x, int32_t y, int32_t z, float 
 VoxelsUpdate along_x(void *voxelizer, int32_t from_x, int32_t to_x, int32_t y, int32_t z,
                      float i);
 
-typedef struct Coord {
+typedef struct Coord
+{
     int32_t x, y, z;
 } Coord;
 
@@ -102,8 +107,8 @@ typedef struct Coord {
  * that exactly those voxels dropped to SEED - 1 and that target went to 1. */
 void check_ray_at(const Impl *impl, PointF sensor, PointF point, const Coord *hit,
                   size_t hit_len, Coord target, const char *file, int line);
-#define CHECK_RAY(impl, sensor, point, target, ...)                                    \
-    check_ray_at((impl), (sensor), (point), ((Coord[]){__VA_ARGS__}),                  \
+#define CHECK_RAY(impl, sensor, point, target, ...)                   \
+    check_ray_at((impl), (sensor), (point), ((Coord[]){__VA_ARGS__}), \
                  ARRAY_LEN(((Coord[]){__VA_ARGS__})), (target), __FILE__, __LINE__)
 
 /* ----------------------------------------------------- compress helpers
@@ -122,7 +127,8 @@ PointI block(int32_t x, int32_t y, int32_t z, uint32_t mask);
  * A deterministic, schedule independent workload used to compare
  * implementations and thread counts (port of `scenario` in src/test.rs). */
 
-typedef struct ScenarioParams {
+typedef struct ScenarioParams
+{
     uint32_t destroy_threshold;
     uint32_t construct_threshold;
     bool compress;
@@ -132,7 +138,8 @@ extern const ScenarioParams SCENARIO_PARAMS[2];
 
 #define SCENARIO_CALLS 2
 
-typedef struct Snapshot {
+typedef struct Snapshot
+{
     /* Sorted output of every call. */
     PointI *results[SCENARIO_CALLS];
     size_t lens[SCENARIO_CALLS];

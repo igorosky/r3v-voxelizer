@@ -14,8 +14,8 @@ struct Params {
     camera_y: f32,
     camera_z: f32,
     resolution: f32,
-    hit_multiplayer: u32,
-    target_multiplayer: u32,
+    hit_multiplier: u32,
+    target_multiplier: u32,
 }
 
 struct Output {
@@ -312,7 +312,7 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var sensor_pos = vec3i(params.camera_x, params.camera_y, params.camera_z);
     let dir = sign(target_point - sensor_pos);
     let cmp = dir == 0;
-    let hit_value = intensity * params.hit_multiplayer;
+    let hit_value = intensity * params.hit_multiplier;
     switch (cmp.x << 2) | (cmp.y << 1) | cmp.z {
     // Straight line
     // x

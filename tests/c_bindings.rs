@@ -35,8 +35,11 @@ impl CTests {
     /// concurrent test runs do not overwrite each other's program.
     fn build() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("c_tests-{}{}", process::id(), consts::EXE_SUFFIX));
+        let exe = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "c_tests-{}{}",
+            process::id(),
+            consts::EXE_SUFFIX
+        ));
         let lib_dir = lib_dir();
         let cc = env::var("CC").unwrap_or_else(|_| "cc".to_owned());
         let output = Command::new(&cc)
@@ -48,7 +51,7 @@ impl CTests {
             .arg(&exe)
             .arg("-L")
             .arg(&lib_dir)
-            .arg("-lvoxelizer")
+            .arg("-lr3v_voxelizer")
             .output()
             .unwrap_or_else(|e| panic!("failed to run C compiler `{cc}`: {e}"));
         assert!(
@@ -63,7 +66,7 @@ impl CTests {
     /// A command running the C test program against this build's cdylib.
     ///
     /// `cargo test` puts `target/<profile>` before `target/<profile>/deps`
-    /// in the library path, and `target/<profile>/libvoxelizer.so` is only
+    /// in the library path, and `target/<profile>/libr3v_voxelizer.so` is only
     /// refreshed by `cargo build`. Without putting `deps` first the program
     /// could load a stale copy (an rpath cannot help: the environment
     /// variable takes precedence over it).
@@ -118,7 +121,7 @@ impl CTests {
 
 /// `target/<profile>/deps`: where rustc writes the cdylib for this test run.
 fn lib_dir() -> PathBuf {
-    let lib_name = format!("{}voxelizer{}", consts::DLL_PREFIX, consts::DLL_SUFFIX);
+    let lib_name = format!("{}r3v_voxelizer{}", consts::DLL_PREFIX, consts::DLL_SUFFIX);
     let exe = env::current_exe().expect("test binary path");
     let dir = exe.parent().expect("test binary has a parent directory");
     assert!(

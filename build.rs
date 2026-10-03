@@ -25,9 +25,18 @@ fn gen_cpp() {
         .write_to_file("bindings/r3v-voxelizer.hpp");
 }
 
+#[cfg(feature = "python")]
+fn gen_python() {
+    pyo3_build_config::add_extension_module_link_args();
+}
+
 fn main() {
+    #[cfg(all(any(feature = "c", feature = "cpp"), feature = "python"))]
+    compile_error!("Cannot build for C/C++ and Python at the same time");
     #[cfg(feature = "c")]
     gen_c();
     #[cfg(feature = "cpp")]
     gen_cpp();
+    #[cfg(feature = "python")]
+    gen_python();
 }

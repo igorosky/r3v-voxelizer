@@ -1,11 +1,9 @@
 use std::ops::{Div, DivAssign, SubAssign};
 
-use zorder::{
-    Deinterleave, Interleave,
-    bmi2::{self, DeinterleaveBMI2, HardwareSupportToken, InterleaveBMI2},
-    coord_of, index_of,
-};
-
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(from_py_object, module = "r3v_voxelizer")
+)]
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct PointF {
@@ -52,6 +50,10 @@ impl DivAssign<f32> for PointF {
     }
 }
 
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(from_py_object, module = "r3v_voxelizer")
+)]
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PointI {
@@ -61,41 +63,52 @@ pub struct PointI {
     pub i: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ZOrder {
-    token: Option<HardwareSupportToken>,
-}
+#[cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
+mod zorder_mod {
+    use zorder::{
+        Deinterleave, Interleave,
+        bmi2::{self, DeinterleaveBMI2, HardwareSupportToken, InterleaveBMI2},
+        coord_of, index_of,
+    };
 
-impl Default for ZOrder {
-    #[inline]
-    fn default() -> Self {
-        Self {
-            token: HardwareSupportToken::new(),
-        }
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ZOrder {
+        token: Option<HardwareSupportToken>,
     }
-}
 
-impl ZOrder {
-    #[inline]
-    pub fn coord_of<I, const N: usize>(&self, index: I) -> [<I as Deinterleave<N>>::Output; N]
-    where
-        I: DeinterleaveBMI2<N> + Copy,
-    {
-        if let Some(token) = self.token {
-            bmi2::coord_of(index, token)
-        } else {
-            coord_of(index)
+    impl Default for ZOrder {
+        #[inline]
+        fn default() -> Self {
+            Self {
+                token: HardwareSupportToken::new(),
+            }
         }
     }
-    #[inline]
-    pub fn index_of<I, const N: usize>(&self, array: [I; N]) -> <I as Interleave<N>>::Output
-    where
-        I: InterleaveBMI2<N>,
-    {
-        if let Some(token) = self.token {
-            bmi2::index_of(array, token)
-        } else {
-            index_of(array)
+
+    impl ZOrder {
+        #[inline]
+        pub fn coord_of<I, const N: usize>(&self, index: I) -> [<I as Deinterleave<N>>::Output; N]
+        where
+            I: DeinterleaveBMI2<N> + Copy,
+        {
+            if let Some(token) = self.token {
+                bmi2::coord_of(index, token)
+            } else {
+                coord_of(index)
+            }
+        }
+        #[inline]
+        pub fn index_of<I, const N: usize>(&self, array: [I; N]) -> <I as Interleave<N>>::Output
+        where
+            I: InterleaveBMI2<N>,
+        {
+            if let Some(token) = self.token {
+                bmi2::index_of(array, token)
+            } else {
+                index_of(array)
+            }
         }
     }
 }
+#[cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
+pub use zorder_mod::ZOrder;

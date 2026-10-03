@@ -21,8 +21,8 @@ pub struct SingleThreaded {
         Option<HashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_COMPRESSED_ZORDER)]>>,
     result: HashMap<PagedIndex, u32>,
     resolution: f32,
-    hit_multiplayer: u32,
-    target_multiplayer: u32,
+    hit_multiplier: u32,
+    target_multiplier: u32,
     destroy_threshold: u32,
     construct_threshold: u32,
     zorder: ZOrder,
@@ -32,8 +32,8 @@ impl SingleThreaded {
     #[inline]
     pub fn new(
         resolution: f32,
-        hit_multiplayer: u32,
-        target_multiplayer: u32,
+        hit_multiplier: u32,
+        target_multiplier: u32,
         destroy_threshold: u32,
         construct_threshold: u32,
         compress: bool,
@@ -43,8 +43,8 @@ impl SingleThreaded {
             compressed_voxels: if compress { Some(HashMap::new()) } else { None },
             result: HashMap::new(),
             resolution,
-            hit_multiplayer,
-            target_multiplayer,
+            hit_multiplier,
+            target_multiplier,
             destroy_threshold,
             construct_threshold,
             zorder: ZOrder::default(),
@@ -203,7 +203,7 @@ impl SingleThreaded {
         let idx = self.get_index(point);
         let entry = self.voxels.entry(idx.0).or_insert_with(|| [0; _]);
         self.result.entry(idx).or_insert(entry[idx.1]);
-        entry[idx.1] += point.i * self.target_multiplayer;
+        entry[idx.1] += point.i * self.target_multiplier;
     }
     fn ray_march(
         &mut self,
@@ -219,7 +219,7 @@ impl SingleThreaded {
             x: point.x.floor() as i32,
             y: point.y.floor() as i32,
             z: point.z.floor() as i32,
-            i: point.i as u32 * self.hit_multiplayer,
+            i: point.i as u32 * self.hit_multiplier,
         };
         let dir_x = (target_point.x - sensor_pos.x).signum();
         let dir_y = (target_point.y - sensor_pos.y).signum();
@@ -343,12 +343,8 @@ mod test {
         SingleThreaded,
     };
     use crate::{
-        Voxelizer,
         geometry::PointI,
-        test::{
-            Coord, PAGE_LEN, PagedIndex, TestVoxelizer, block, block_bit, compressed,
-            compressed_bits, compressed_word, get_voxel, page_bit, pf, pi, plain,
-        },
+        test::{Coord, PAGE_LEN, PagedIndex, TestVoxelizer, compressed, pi, plain},
     };
 
     impl TestVoxelizer for SingleThreaded {
@@ -358,16 +354,16 @@ mod test {
         const PAGE_SIZE: u32 = PAGE_SIZE;
         fn make(
             resolution: f32,
-            hit_multiplayer: u32,
-            target_multiplayer: u32,
+            hit_multiplier: u32,
+            target_multiplier: u32,
             destroy_threshold: u32,
             construct_threshold: u32,
             compress: bool,
         ) -> Self {
             Self::new(
                 resolution,
-                hit_multiplayer,
-                target_multiplayer,
+                hit_multiplier,
+                target_multiplier,
                 destroy_threshold,
                 construct_threshold,
                 compress,
@@ -414,8 +410,8 @@ mod test {
     fn new_stores_parameters() {
         let v = SingleThreaded::new(0.5, 2, 3, 4, 5, false);
         assert_eq!(v.resolution, 0.5);
-        assert_eq!(v.hit_multiplayer, 2);
-        assert_eq!(v.target_multiplayer, 3);
+        assert_eq!(v.hit_multiplier, 2);
+        assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
         assert!(v.voxels.is_empty());

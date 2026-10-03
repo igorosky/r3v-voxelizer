@@ -4,6 +4,9 @@
 //! inside its own `mod test` and instantiates the suite with
 //! [`shared_tests!`]. Tests whose outcome depends on the order in which the
 //! rays of one call are processed do not belong here.
+//!
+//! Without any implementation feature there is nothing to run it against.
+#![cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -32,8 +35,8 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
     /// `new` without anything implementation specific.
     fn make(
         resolution: f32,
-        hit_multiplayer: u32,
-        target_multiplayer: u32,
+        hit_multiplier: u32,
+        target_multiplier: u32,
         destroy_threshold: u32,
         construct_threshold: u32,
         compress: bool,
@@ -344,9 +347,9 @@ macro_rules! shared_tests {
             resolution_scales_sensor_too,
             large_coords,
             negative_coords_use_floor,
-            hit_multiplayer_scales_hits,
-            target_multiplayer_scales_target,
-            both_multiplayers,
+            hit_multiplier_scales_hits,
+            target_multiplier_scales_target,
+            both_multipliers,
             hit_saturates_at_zero,
             hit_on_zero_voxel_not_reported,
             thresholds_ignored_without_compress,
@@ -597,7 +600,7 @@ pub(crate) fn negative_coords_use_floor<T: TestVoxelizer>() {
 
 // ------------------------------------------------ multipliers / saturation
 
-pub(crate) fn hit_multiplayer_scales_hits<T: TestVoxelizer>() {
+pub(crate) fn hit_multiplier_scales_hits<T: TestVoxelizer>() {
     let mut v = T::make(1.0, 3, 1, 0, 1, false);
     v.set_voxel(0, 0, 0, SEED);
     let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 2.0)]);
@@ -607,7 +610,7 @@ pub(crate) fn hit_multiplayer_scales_hits<T: TestVoxelizer>() {
     );
 }
 
-pub(crate) fn target_multiplayer_scales_target<T: TestVoxelizer>() {
+pub(crate) fn target_multiplier_scales_target<T: TestVoxelizer>() {
     let mut v = T::make(1.0, 1, 5, 0, 1, false);
     v.set_voxel(0, 0, 0, SEED);
     let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 2.0)]);
@@ -617,7 +620,7 @@ pub(crate) fn target_multiplayer_scales_target<T: TestVoxelizer>() {
     );
 }
 
-pub(crate) fn both_multiplayers<T: TestVoxelizer>() {
+pub(crate) fn both_multipliers<T: TestVoxelizer>() {
     let mut v = T::make(1.0, 2, 3, 0, 1, false);
     v.set_voxel(0, 0, 0, SEED);
     let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 2.0)]);

@@ -148,7 +148,7 @@ static void negative_coords_use_floor(const Impl *impl) {
 
 /* ---------------------------------------- multipliers / saturation */
 
-static void hit_multiplayer_scales_hits(const Impl *impl) {
+static void hit_multiplier_scales_hits(const Impl *impl) {
     void *v = make(impl, 1.0f, 3, 1, 0, 1, false);
     seed_at(v, 0, 0, 0, SEED);
     EXPECT_VOXELS(add_point(v, SENSOR, pf(3.5f, 0.5f, 0.5f, 2.0f)), pi(0, 0, 0, SEED - 2 * 3),
@@ -156,7 +156,7 @@ static void hit_multiplayer_scales_hits(const Impl *impl) {
     drop_voxelizer(v);
 }
 
-static void target_multiplayer_scales_target(const Impl *impl) {
+static void target_multiplier_scales_target(const Impl *impl) {
     void *v = make(impl, 1.0f, 1, 5, 0, 1, false);
     /* Seeding goes through the target path too: 2 * 5 = SEED. */
     seed(v, 1.0f, 0, 0, 0, (float)(SEED / 5));
@@ -165,7 +165,7 @@ static void target_multiplayer_scales_target(const Impl *impl) {
     drop_voxelizer(v);
 }
 
-static void both_multiplayers(const Impl *impl) {
+static void both_multipliers(const Impl *impl) {
     void *v = make(impl, 1.0f, 2, 3, 0, 1, false);
     /* Seeds (0,0,0) with 4 * 3 = 12. */
     seed(v, 1.0f, 0, 0, 0, 4.0f);
@@ -638,9 +638,9 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(resolution_scales_sensor_too),
     PER_IMPL(large_coords),
     PER_IMPL(negative_coords_use_floor),
-    PER_IMPL(hit_multiplayer_scales_hits),
-    PER_IMPL(target_multiplayer_scales_target),
-    PER_IMPL(both_multiplayers),
+    PER_IMPL(hit_multiplier_scales_hits),
+    PER_IMPL(target_multiplier_scales_target),
+    PER_IMPL(both_multipliers),
     PER_IMPL(hit_saturates_at_zero),
     PER_IMPL(hit_on_zero_voxel_not_reported),
     PER_IMPL(thresholds_ignored_without_compress),

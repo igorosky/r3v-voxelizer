@@ -13,24 +13,24 @@ pub struct VoxelsUpdate {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn create_single_threaded_voxelizer(
-    resolution: f32,
-    hit_multiplayer: u32,
-    target_multiplayer: u32,
-    destroy_threshold: u32,
-    construct_threshold: u32,
-    compress: bool,
+    _resolution: f32,
+    _hit_multiplier: u32,
+    _target_multiplier: u32,
+    _destroy_threshold: u32,
+    _construct_threshold: u32,
+    _compress: bool,
 ) -> *mut c_void {
-    #[cfg(not(feature = "multi_threaded"))]
+    #[cfg(not(feature = "single_threaded"))]
     return core::ptr::null_mut();
     #[cfg(feature = "single_threaded")]
     {
         let voxelizer: Box<dyn Voxelizer> = Box::new(crate::SingleThreaded::new(
-            resolution,
-            hit_multiplayer,
-            target_multiplayer,
-            destroy_threshold,
-            construct_threshold,
-            compress,
+            _resolution,
+            _hit_multiplier,
+            _target_multiplier,
+            _destroy_threshold,
+            _construct_threshold,
+            _compress,
         ));
         Box::into_raw(Box::new(voxelizer)) as *mut c_void
     }
@@ -38,13 +38,13 @@ pub extern "C" fn create_single_threaded_voxelizer(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn create_multi_threaded_voxelizer(
-    resolution: f32,
-    hit_multiplayer: u32,
-    target_multiplayer: u32,
-    destroy_threshold: u32,
-    construct_threshold: u32,
-    compress: bool,
-    thread_count: usize,
+    _resolution: f32,
+    _hit_multiplier: u32,
+    _target_multiplier: u32,
+    _destroy_threshold: u32,
+    _construct_threshold: u32,
+    _compress: bool,
+    _thread_count: usize,
 ) -> *mut c_void {
     #[cfg(not(feature = "multi_threaded"))]
     return core::ptr::null_mut();
@@ -52,13 +52,13 @@ pub extern "C" fn create_multi_threaded_voxelizer(
     {
         let voxelizer: Box<dyn Voxelizer> = Box::new(
             match crate::MultiThreaded::new(
-                resolution,
-                hit_multiplayer,
-                target_multiplayer,
-                destroy_threshold,
-                construct_threshold,
-                compress,
-                thread_count,
+                _resolution,
+                _hit_multiplier,
+                _target_multiplier,
+                _destroy_threshold,
+                _construct_threshold,
+                _compress,
+                _thread_count,
             ) {
                 Ok(v) => v,
                 Err(_) => return core::ptr::null_mut(),
