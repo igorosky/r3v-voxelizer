@@ -4,7 +4,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-struct WgpuAccelerated {
+pub struct WgpuAccelerated {
     has_uma: bool,
 }
 
