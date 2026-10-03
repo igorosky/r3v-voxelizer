@@ -1,9 +1,8 @@
 use core::ffi::c_void;
 
 use crate::{
-    SingleThreaded, Voxelizer,
+    Voxelizer,
     geometry::{PointF, PointI},
-    multi_threaded::MultiThreaded,
 };
 
 #[repr(C)]
@@ -21,15 +20,20 @@ pub extern "C" fn create_single_threaded_voxelizer(
     construct_threshold: u32,
     compress: bool,
 ) -> *mut c_void {
-    let voxelizer: Box<dyn Voxelizer> = Box::new(SingleThreaded::new(
-        resolution,
-        hit_multiplayer,
-        target_multiplayer,
-        destroy_threshold,
-        construct_threshold,
-        compress,
-    ));
-    Box::into_raw(Box::new(voxelizer)) as *mut c_void
+    #[cfg(not(feature = "multi_threaded"))]
+    return core::ptr::null_mut();
+    #[cfg(feature = "single_threaded")]
+    {
+        let voxelizer: Box<dyn Voxelizer> = Box::new(crate::SingleThreaded::new(
+            resolution,
+            hit_multiplayer,
+            target_multiplayer,
+            destroy_threshold,
+            construct_threshold,
+            compress,
+        ));
+        Box::into_raw(Box::new(voxelizer)) as *mut c_void
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -42,21 +46,26 @@ pub extern "C" fn create_multi_threaded_voxelizer(
     compress: bool,
     thread_count: usize,
 ) -> *mut c_void {
-    let voxelizer: Box<dyn Voxelizer> = Box::new(
-        match MultiThreaded::new(
-            resolution,
-            hit_multiplayer,
-            target_multiplayer,
-            destroy_threshold,
-            construct_threshold,
-            compress,
-            thread_count,
-        ) {
-            Ok(v) => v,
-            Err(_) => return core::ptr::null_mut() as *mut c_void,
-        },
-    );
-    Box::into_raw(Box::new(voxelizer)) as *mut c_void
+    #[cfg(not(feature = "multi_threaded"))]
+    return core::ptr::null_mut();
+    #[cfg(feature = "multi_threaded")]
+    {
+        let voxelizer: Box<dyn Voxelizer> = Box::new(
+            match crate::MultiThreaded::new(
+                resolution,
+                hit_multiplayer,
+                target_multiplayer,
+                destroy_threshold,
+                construct_threshold,
+                compress,
+                thread_count,
+            ) {
+                Ok(v) => v,
+                Err(_) => return core::ptr::null_mut(),
+            },
+        );
+        Box::into_raw(Box::new(voxelizer)) as *mut c_void
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -66,6 +75,12 @@ pub extern "C" fn add_points(
     points: *const PointF,
     count: usize,
 ) -> VoxelsUpdate {
+    if voxelizer.is_null() || points.is_null() || count == 0 {
+        return VoxelsUpdate {
+            data: core::ptr::null_mut(),
+            len: 0,
+        };
+    }
     let mut voxelizer = unsafe { Box::from_raw(voxelizer as *mut Box<dyn Voxelizer>) };
     let points = unsafe { std::slice::from_raw_parts(points, count) };
     let mut result = voxelizer.add_points(sensor_pos, points).into_boxed_slice();
@@ -78,14 +93,14 @@ pub extern "C" fn add_points(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn drop_update(update: VoxelsUpdate) {
-    if update.data != core::ptr::null_mut() && update.len != 0 {
+    if !update.data.is_null() && update.len != 0 {
         drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(update.data, update.len)) });
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn drop_voxelizer(voxelizer: *mut c_void) {
-    if voxelizer != core::ptr::null_mut() {
+    if !voxelizer.is_null() {
         drop(unsafe { Box::from_raw(voxelizer as *mut Box<dyn Voxelizer>) });
     }
 }
