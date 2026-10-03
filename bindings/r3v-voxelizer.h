@@ -6,6 +6,18 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+typedef struct PointI {
+  int32_t x;
+  int32_t y;
+  int32_t z;
+  uint32_t i;
+} PointI;
+
+typedef struct VoxelsUpdate {
+  struct PointI *data;
+  uintptr_t len;
+} VoxelsUpdate;
+
 typedef struct PointF {
   float x;
   float y;
@@ -28,10 +40,12 @@ void *create_multi_threaded_voxelizer(float resolution,
                                       bool compress,
                                       uintptr_t thread_count);
 
-void add_points(void *voxelizer,
-                struct PointF sensor_pos,
-                const struct PointF *points,
-                uintptr_t count);
+struct VoxelsUpdate add_points(void *voxelizer,
+                               struct PointF sensor_pos,
+                               const struct PointF *points,
+                               uintptr_t count);
+
+void drop_update(struct VoxelsUpdate update);
 
 void drop_voxelizer(void *voxelizer);
 

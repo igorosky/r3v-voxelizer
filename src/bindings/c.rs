@@ -1,6 +1,16 @@
 use core::ffi::c_void;
 
-use crate::{SingleThreaded, Voxelizer, geometry::PointF, multi_threaded::MultiThreaded};
+use crate::{
+    SingleThreaded, Voxelizer,
+    geometry::{PointF, PointI},
+    multi_threaded::MultiThreaded,
+};
+
+#[repr(C)]
+pub struct VoxelsUpdate {
+    data: *mut PointI,
+    len: usize,
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn create_single_threaded_voxelizer(
@@ -55,14 +65,27 @@ pub extern "C" fn add_points(
     sensor_pos: PointF,
     points: *const PointF,
     count: usize,
-) {
+) -> VoxelsUpdate {
     let mut voxelizer = unsafe { Box::from_raw(voxelizer as *mut Box<dyn Voxelizer>) };
     let points = unsafe { std::slice::from_raw_parts(points, count) };
-    voxelizer.add_points(sensor_pos, points);
+    let mut result = voxelizer.add_points(sensor_pos, points).into_boxed_slice();
     std::mem::forget(voxelizer);
+    let len = result.len();
+    let data = result.as_mut_ptr();
+    std::mem::forget(result);
+    VoxelsUpdate { data, len }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drop_update(update: VoxelsUpdate) {
+    if update.data != core::ptr::null_mut() && update.len != 0 {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(update.data, update.len)) });
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn drop_voxelizer(voxelizer: *mut c_void) {
-    drop(unsafe { Box::from_raw(voxelizer as *mut Box<dyn Voxelizer>) });
+    if voxelizer != core::ptr::null_mut() {
+        drop(unsafe { Box::from_raw(voxelizer as *mut Box<dyn Voxelizer>) });
+    }
 }

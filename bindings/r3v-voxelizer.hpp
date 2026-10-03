@@ -6,6 +6,21 @@
 #include <ostream>
 #include <new>
 
+namespace r3v {
+namespace voxelizer {
+
+struct PointI {
+  int32_t x;
+  int32_t y;
+  int32_t z;
+  uint32_t i;
+};
+
+struct VoxelsUpdate {
+  PointI *data;
+  uintptr_t len;
+};
+
 struct PointF {
   float x;
   float y;
@@ -30,8 +45,13 @@ void *create_multi_threaded_voxelizer(float resolution,
                                       bool compress,
                                       uintptr_t thread_count);
 
-void add_points(void *voxelizer, PointF sensor_pos, const PointF *points, uintptr_t count);
+VoxelsUpdate add_points(void *voxelizer, PointF sensor_pos, const PointF *points, uintptr_t count);
+
+void drop_update(VoxelsUpdate update);
 
 void drop_voxelizer(void *voxelizer);
 
 }  // extern "C"
+
+}  // namespace voxelizer
+}  // namespace r3v

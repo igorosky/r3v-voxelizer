@@ -19,6 +19,7 @@ fn gen_cpp() {
         .with_language(cbindgen::Language::Cxx)
         .with_braces(cbindgen::Braces::SameLine)
         .with_pragma_once(true)
+        .with_namespaces(&["r3v", "voxelizer"])
         .generate()
         .expect("Failed to generate C bindings")
         .write_to_file("bindings/r3v-voxelizer.hpp");
