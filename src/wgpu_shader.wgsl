@@ -305,7 +305,7 @@ fn sub_val_if_exists(pos: vec3i, val: StoredValue) -> bool {
 // End of Hashmap implementation
 
 @compute @workgroup_size(256)
-fn addPoints(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn ray_march(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let point = input_points[global_id.x] / params.resolution;
     let intensity = u32(point.w);
     let target_point = vec3i(floor(point));
@@ -347,4 +347,11 @@ fn addPoints(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     default /*7*/ : { /*NOOP*/ } //
     }
+}
+
+@compute @workgroup_size(256)
+fn add_point(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let point = input_points[global_id.x] / params.resolution;
+    add_val(a
+    :)
 }
