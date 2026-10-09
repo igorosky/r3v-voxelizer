@@ -6,7 +6,11 @@
 //! rays of one call are processed do not belong here.
 //!
 //! Without any implementation feature there is nothing to run it against.
-#![cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
+#![cfg(any(
+    feature = "single_threaded",
+    feature = "multi_threaded",
+    feature = "wgpu"
+))]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -1328,5 +1332,28 @@ fn single_and_multi_agree() {
                 &format!("compress = {compress}, threads = {threads}"),
             );
         }
+    }
+}
+
+#[cfg(all(feature = "single_threaded", feature = "wgpu"))]
+#[test]
+fn single_and_wgpu_agree() {
+    use crate::{SingleThreaded, WgpuAccelerated};
+    for (destroy, construct, compress) in SCENARIO_PARAMS {
+        let expected = scenario(SingleThreaded::new(1.0, 1, 1, destroy, construct, compress));
+        assert!(expected.results.iter().all(|r| !r.is_empty()));
+        let got = scenario(
+            pollster::block_on(WgpuAccelerated::new(
+                1.0,
+                1,
+                1,
+                destroy,
+                construct,
+                compress,
+                1 << 12,
+            ))
+            .expect("a GPU adapter with compute shaders is required"),
+        );
+        assert_snapshot_eq(&got, &expected, &format!("compress = {compress}"));
     }
 }

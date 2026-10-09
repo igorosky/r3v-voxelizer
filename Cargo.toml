@@ -33,7 +33,7 @@ js = ["dep:wasm-bindgen", "dep:js-sys"]
 multi_threaded = ["dep:rayon", "dep:dashmap", "dep:zorder"]
 python = ["dep:pyo3", "dep:pyo3-build-config"]
 single_threaded = ["dep:hashbrown", "dep:zorder"]
-wgpu = ["dep:wgpu", "dep:bytemuck"]
+wgpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:zorder"]
 
 [[test]]
 name = "c_bindings"

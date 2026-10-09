@@ -17,6 +17,8 @@ suites=(
     "python,single_threaded,multi_threaded"
     "js"
     "js,single_threaded"
+    "wgpu"
+    "wgpu,single_threaded"
 )
 
 echo "Running cargo check for all suites..."

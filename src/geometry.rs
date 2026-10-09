@@ -65,7 +65,11 @@ pub struct PointI {
     pub i: u32,
 }
 
-#[cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
+#[cfg(any(
+    feature = "single_threaded",
+    feature = "multi_threaded",
+    feature = "wgpu"
+))]
 mod zorder_mod {
     use zorder::{
         Deinterleave, Interleave,
@@ -112,5 +116,9 @@ mod zorder_mod {
         }
     }
 }
-#[cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
+#[cfg(any(
+    feature = "single_threaded",
+    feature = "multi_threaded",
+    feature = "wgpu"
+))]
 pub use zorder_mod::ZOrder;
