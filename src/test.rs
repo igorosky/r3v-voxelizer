@@ -364,6 +364,9 @@ macro_rules! shared_tests {
             hits_skip_missing_pages,
             negative_page,
             target_page_created_lazily,
+            emptied_page_removed,
+            partially_emptied_page_kept,
+            refilled_page_kept,
             axis_x_negative,
             axis_y_positive,
             axis_y_negative,
@@ -385,6 +388,8 @@ macro_rules! shared_tests {
             compress_destroy_clears_bit,
             compress_construct_threshold,
             compress_destroy_threshold,
+            compress_emptied_pages_removed,
+            compress_constructed_voxel_keeps_page,
             compress_bit_positions,
             compress_both_halves_same_page,
             compress_two_voxels_same_block,
@@ -818,6 +823,49 @@ pub(crate) fn target_page_created_lazily<T: TestVoxelizer>() {
     assert!(page(&v, (2, 0, 0)).is_some());
 }
 
+pub(crate) fn emptied_page_removed<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(1, 0, 0, 1);
+    // Zeroes (1,0,0), the only non zero voxel of page (0,0,0), and ends in
+    // page (1,0,0).
+    let result = along_x(&mut v, 1, 5, 0, 0, 1.0);
+    // The drop to 0 is still reported.
+    assert_eq!(sorted(result), vec![pi(1, 0, 0, 0), pi(5, 0, 0, 1)]);
+    assert!(page(&v, (0, 0, 0)).is_none());
+    assert_eq!(v.pages().len(), 1);
+    assert_eq!(v.pending_results(), 0);
+    // Hits on the removed page change nothing, a target creates it again.
+    assert_eq!(along_x(&mut v, 1, 2, 0, 0, 1.0), vec![pi(2, 0, 0, 1)]);
+    assert_eq!(get_voxel(&v, 1, 0, 0), Some(0));
+    assert_eq!(v.pages().len(), 2);
+}
+
+pub(crate) fn partially_emptied_page_kept<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(1, 0, 0, 1);
+    v.set_voxel(1, 1, 0, 1);
+    let result = along_x(&mut v, 1, 5, 0, 0, 1.0);
+    assert_eq!(sorted(result), vec![pi(1, 0, 0, 0), pi(5, 0, 0, 1)]);
+    assert_eq!(get_voxel(&v, 1, 0, 0), Some(0));
+    assert_eq!(get_voxel(&v, 1, 1, 0), Some(1));
+    assert_eq!(v.pages().len(), 2);
+}
+
+pub(crate) fn refilled_page_kept<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(1, 0, 0, 1);
+    // The ray to (5,0,0) zeroes (1,0,0), the second point refills it before
+    // the end of the call, so it is not even reported.
+    let result = v.add_points(
+        pf(0.5, 0.5, 0.5, 1.0),
+        &[pf(5.5, 0.5, 0.5, 1.0), pf(1.5, 0.5, 0.5, 1.0)],
+    );
+    assert_eq!(result, vec![pi(5, 0, 0, 1)]);
+    assert_eq!(get_voxel(&v, 1, 0, 0), Some(1));
+    assert_eq!(v.pages().len(), 2);
+    assert_eq!(v.pending_results(), 0);
+}
+
 // -------------------------------------------------------- ray march arms
 
 pub(crate) fn axis_x_negative<T: TestVoxelizer>() {
@@ -1017,7 +1065,9 @@ pub(crate) fn compress_destroy_clears_bit<T: TestVoxelizer>() {
     along_x(&mut v, 0, 3, 0, 0, 1.0);
     // Passes through (3,0,0): 1 -> 0, destroyed. Ends in (7,0,0): constructed.
     let result = along_x(&mut v, 0, 7, 0, 0, 1.0);
-    assert_eq!(get_voxel(&v, 3, 0, 0), Some(0));
+    // The page of (3,0,0) got empty and is removed, the compressed page
+    // stays for (7,0,0).
+    assert_eq!(get_voxel(&v, 3, 0, 0), None);
     assert_eq!(get_voxel(&v, 7, 0, 0), Some(1));
     assert_eq!(compressed_word(&v, 3, 0, 0), Some(0));
     assert_eq!(compressed_word(&v, 7, 0, 0), Some(page_bit(7, 0, 0)));
@@ -1063,12 +1113,46 @@ pub(crate) fn compress_destroy_threshold<T: TestVoxelizer>() {
     let result = along_x(&mut v, 0, 7, 0, 0, 2.0);
     assert_eq!(get_voxel(&v, 3, 0, 0), Some(2));
     assert_eq!(get_voxel(&v, 7, 0, 0), Some(3));
-    assert_eq!(compressed_word(&v, 3, 0, 0), Some(0));
-    assert!(compressed_bits(&v).is_empty());
+    // No bit is left, so the compressed page is removed.
+    assert_eq!(compressed_word(&v, 3, 0, 0), None);
+    assert!(v.compressed_pages().unwrap().is_empty());
     assert_eq!(result, vec![block(3, 0, 0, 0)]);
     // 2 -> 1 is already below: no second destroy.
     assert!(along_x(&mut v, 0, 7, 0, 0, 1.0).is_empty());
-    assert_eq!(compressed_word(&v, 3, 0, 0), Some(0));
+    assert_eq!(compressed_word(&v, 3, 0, 0), None);
+}
+
+pub(crate) fn compress_emptied_pages_removed<T: TestVoxelizer>() {
+    let mut v = compressed::<T>();
+    along_x(&mut v, 0, 3, 0, 0, 1.0);
+    // Destroys (3,0,0), emptying its page and its compressed page. The
+    // target (70,0,0) lies in the next compressed page.
+    let result = along_x(&mut v, 3, 70, 0, 0, 1.0);
+    assert_eq!(
+        sorted(result),
+        sorted(vec![
+            block(3, 0, 0, 0),
+            block(70, 0, 0, block_bit(70, 0, 0))
+        ])
+    );
+    assert_eq!(get_voxel(&v, 3, 0, 0), None);
+    assert_eq!(compressed_word(&v, 3, 0, 0), None);
+    assert_eq!(compressed_bits(&v), vec![pi(70, 0, 0, 1)]);
+    assert_eq!(v.pages().len(), 1);
+    assert_eq!(v.compressed_pages().unwrap().len(), 1);
+    assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn compress_constructed_voxel_keeps_page<T: TestVoxelizer>() {
+    // With the destroy threshold above the construct one a voxel can drop to
+    // 0 without being destroyed: its page is all 0 but still has a bit set.
+    let mut v = T::make(1.0, 1, 1, 5, 3, true);
+    along_x(&mut v, 0, 3, 0, 0, 4.0);
+    let result = along_x(&mut v, 3, 9, 0, 0, 4.0);
+    assert_eq!(result, vec![block(9, 0, 0, block_bit(9, 0, 0))]);
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(0));
+    assert_eq!(compressed_word(&v, 3, 0, 0), Some(page_bit(3, 0, 0)));
+    assert_eq!(v.pages().len(), 2);
 }
 
 pub(crate) fn compress_bit_positions<T: TestVoxelizer>() {

@@ -8,14 +8,14 @@ const WORKGROUP_SIZE: u32 = 256;
 const BITS_FOR_ENTRY_VOXEL_COUNT: u32 = 2;
 const ENTRY_VOXEL_COUNT: u64 = 1 << (3 * BITS_FOR_ENTRY_VOXEL_COUNT);
 const BUCKET_SIZE: u64 = 2;
-/// `Entry`: x, y, z, offset, flags, occupancy[2]
-const ENTRY_BYTES: u64 = 7 * 4;
-/// `Bucket`: lock + entries
-const BUCKET_BYTES: u64 = 4 + BUCKET_SIZE * ENTRY_BYTES;
+/// `Entry`: key[3], flags, occupancy[2]
+const ENTRY_BYTES: u64 = 6 * 4;
+/// Entries first probed for the keys hashed into a bucket
+const BUCKET_BYTES: u64 = BUCKET_SIZE * ENTRY_BYTES;
 /// `Voxel`: value + prev
 const VOXEL_BYTES: u64 = 2 * 4;
-/// `Altered` header: len
-const ALTERED_HEADER_BYTES: u64 = 4;
+/// `EntryList` header: len
+const ENTRY_LIST_HEADER_BYTES: u64 = 4;
 /// `Output` header: len + error, padded to the alignment of `vec4i`
 const OUTPUT_HEADER_BYTES: u64 = 16;
 /// `Params`
@@ -30,14 +30,18 @@ enum Kernel {
     RayMarch,
     AddPoint,
     Collect,
+    RemoveEmpty,
+    ReclaimRemoved,
     SetVoxels,
 }
 
 impl Kernel {
-    const ALL: [Kernel; 4] = [
+    const ALL: [Kernel; 6] = [
         Kernel::RayMarch,
         Kernel::AddPoint,
         Kernel::Collect,
+        Kernel::RemoveEmpty,
+        Kernel::ReclaimRemoved,
         Kernel::SetVoxels,
     ];
     fn entry_point(self) -> &'static str {
@@ -45,6 +49,8 @@ impl Kernel {
             Kernel::RayMarch => "ray_march",
             Kernel::AddPoint => "add_point",
             Kernel::Collect => "collect",
+            Kernel::RemoveEmpty => "remove_empty",
+            Kernel::ReclaimRemoved => "reclaim_removed",
             Kernel::SetVoxels => "set_voxels",
         }
     }
@@ -55,12 +61,13 @@ impl Kernel {
 /// Voxels live in a fixed size hashmap of `bucket_count` buckets, each one
 /// holding 2 pages of 4x4x4 voxels. A bucket takes about 1 KiB of GPU memory
 /// (see [`WgpuAccelerated::memory_size`]). Values of pages that do not fit
-/// anymore are dropped.
+/// anymore are dropped. Pages whose voxels all drop to 0 during a call are
+/// removed at its end, freeing their space.
 #[derive(Debug)]
 pub struct WgpuAccelerated {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipelines: [wgpu::ComputePipeline; 4],
+    pipelines: [wgpu::ComputePipeline; Kernel::ALL.len()],
     io_layout: wgpu::BindGroupLayout,
     io_bind_group: wgpu::BindGroup,
     storage_bind_group: wgpu::BindGroup,
@@ -68,6 +75,7 @@ pub struct WgpuAccelerated {
     input: wgpu::Buffer,
     altered: wgpu::Buffer,
     output: wgpu::Buffer,
+    emptied: wgpu::Buffer,
     // Used through `storage_bind_group`, the fields are read back by the tests
     #[cfg_attr(not(test), expect(dead_code))]
     buckets: wgpu::Buffer,
@@ -100,6 +108,8 @@ impl Voxelizer for WgpuAccelerated {
         };
         self.queue
             .write_buffer(&self.altered, 0, &0u32.to_ne_bytes());
+        self.queue
+            .write_buffer(&self.emptied, 0, &0u32.to_ne_bytes());
         for kernels in passes {
             for chunk in &chunks {
                 self.upload_input(chunk);
@@ -129,6 +139,11 @@ impl Voxelizer for WgpuAccelerated {
             self.write_params([0.0; 3], count, first);
             let mut encoder = self.encoder();
             self.dispatch(&mut encoder, Kernel::Collect, count * 2);
+            if first + count == altered {
+                // Emptied entries are altered as well, so this many threads cover them
+                self.dispatch(&mut encoder, Kernel::RemoveEmpty, altered);
+                self.dispatch(&mut encoder, Kernel::ReclaimRemoved, altered);
+            }
             let [len, error] = self.read_words(encoder, &self.output, 0, 2)[..] else {
                 unreachable!("2 words are read");
             };
@@ -164,8 +179,12 @@ impl WgpuAccelerated {
         let entry_count = u64::from(bucket_count) * BUCKET_SIZE;
         u64::from(bucket_count) * BUCKET_BYTES
             + entry_count * ENTRY_VOXEL_COUNT * VOXEL_BYTES
-            + ALTERED_HEADER_BYTES
-            + entry_count * 4
+            + 2 * Self::entry_list_size(entry_count)
+    }
+
+    /// Size of a list (`altered` or `emptied`) able to hold every entry.
+    fn entry_list_size(entry_count: u64) -> u64 {
+        ENTRY_LIST_HEADER_BYTES + entry_count * 4
     }
 
     /// Returns `None` when there is no adapter capable of running compute
@@ -188,7 +207,7 @@ impl WgpuAccelerated {
         }
         let buckets_size = u64::from(bucket_count) * BUCKET_BYTES;
         let voxels_size = voxel_count * VOXEL_BYTES;
-        let altered_size = ALTERED_HEADER_BYTES + entry_count * 4;
+        let list_size = Self::entry_list_size(entry_count);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
@@ -206,7 +225,7 @@ impl WgpuAccelerated {
         let max_binding_size = adapter_limits
             .max_storage_buffer_binding_size
             .min(adapter_limits.max_buffer_size);
-        if buckets_size.max(voxels_size).max(altered_size) > max_binding_size {
+        if buckets_size.max(voxels_size).max(list_size) > max_binding_size {
             return None;
         }
         let has_uma = {
@@ -256,6 +275,7 @@ impl WgpuAccelerated {
                 layout_entry(1, storage(true)),
                 layout_entry(2, storage(false)),
                 layout_entry(3, storage(false)),
+                layout_entry(4, storage(false)),
             ],
         });
         let storage_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -298,12 +318,14 @@ impl WgpuAccelerated {
         let input = Self::input_buffer(&device, INITIAL_CAPACITY);
         let output = Self::output_buffer(&device, INITIAL_CAPACITY);
         let readable = Usage::STORAGE | Usage::COPY_SRC | Usage::COPY_DST;
-        let altered = buffer("altered", altered_size, readable);
+        let altered = buffer("altered", list_size, readable);
+        let emptied = buffer("emptied", list_size, Usage::STORAGE | Usage::COPY_DST);
         // Zero initialized, which is an empty hashmap
         let buckets = buffer("buckets", buckets_size, readable);
         let voxels = buffer("voxels", voxels_size, readable);
-        let io_bind_group =
-            Self::io_bind_group(&device, &io_layout, &params, &input, &altered, &output);
+        let io_bind_group = Self::io_bind_group(
+            &device, &io_layout, &params, &input, &altered, &output, &emptied,
+        );
         let storage_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hashmap"),
             layout: &storage_layout,
@@ -334,6 +356,7 @@ impl WgpuAccelerated {
             input,
             altered,
             output,
+            emptied,
             buckets,
             voxels,
             resolution,
@@ -372,11 +395,12 @@ impl WgpuAccelerated {
         input: &wgpu::Buffer,
         altered: &wgpu::Buffer,
         output: &wgpu::Buffer,
+        emptied: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("io"),
             layout,
-            entries: &[params, input, altered, output]
+            entries: &[params, input, altered, output, emptied]
                 .into_iter()
                 .enumerate()
                 .map(|(binding, buffer)| wgpu::BindGroupEntry {
@@ -395,6 +419,7 @@ impl WgpuAccelerated {
             &self.input,
             &self.altered,
             &self.output,
+            &self.emptied,
         );
     }
 
@@ -522,7 +547,7 @@ mod test {
         Voxelizer,
         geometry::{PointI, ZOrder},
         test::{
-            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PagedIndex, TestVoxelizer, cube_faces,
+            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PagedIndex, TestVoxelizer, along_x, cube_faces,
             from_above, get_voxel, nonzero_voxels, pf, pi, seed, sorted, with_i,
         },
     };
@@ -532,9 +557,10 @@ mod test {
     const BITS_FOR_COMPRESSED_ZORDER: u32 = 4;
     const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = 2_i32.pow(BITS_FOR_COMPRESSED_ZORDER) - 1;
     // Must match the shader
-    const ENTRY_OCCUPIED_MASK: u32 = 1 << 31;
+    const KEY_SET: u32 = 1 << 31;
+    const KEY_REMOVED: u32 = 1;
     const ENTRY_TOUCHED: u32 = 1;
-    const ENTRY_CONSTRUCTED: u32 = 2;
+    const ENTRY_MAYBE_EMPTY: u32 = 2;
 
     fn new(
         resolution: f32,
@@ -579,7 +605,7 @@ mod test {
         }
 
         fn entries(&self) -> Vec<Entry> {
-            let buckets: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read_back(
+            let entries: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read_back(
                 self.encoder(),
                 &self.buckets,
                 0,
@@ -591,34 +617,44 @@ mod test {
                 0,
                 self.voxels.size(),
             ));
-            let bucket_words = (BUCKET_BYTES / 4) as usize;
             let entry_words = (ENTRY_BYTES / 4) as usize;
             let voxel_words = (VOXEL_BYTES / 4) as usize;
             let mut out = Vec::new();
-            for bucket in 0..(self.buckets.size() / BUCKET_BYTES) as usize {
-                for i in 0..BUCKET_SIZE as usize {
-                    let start = bucket * bucket_words + 1 + i * entry_words;
-                    let [x, y, z, offset, flags, low, high] = buckets[start..start + entry_words]
-                    else {
-                        unreachable!("an entry is 7 words");
-                    };
-                    if offset & ENTRY_OCCUPIED_MASK == 0 {
-                        continue;
-                    }
-                    let entry = bucket * BUCKET_SIZE as usize + i;
-                    // Shifting left restores the sign of the page coordinates
-                    let page = |c: u32| ((c << BITS_FOR_ENTRY_VOXEL_COUNT) as i32) >> 2;
-                    out.push(Entry {
-                        page: (page(x), page(y), page(z)),
-                        flags,
-                        occupancy: u64::from(low) | (u64::from(high) << 32),
-                        voxels: std::array::from_fn(|inner| {
-                            voxels[(entry * ENTRY_VOXEL_COUNT as usize + inner) * voxel_words]
-                        }),
-                    });
+            for (entry, words) in entries.chunks_exact(entry_words).enumerate() {
+                let [x, y, z, flags, low, high] = *words else {
+                    unreachable!("an entry is 6 words");
+                };
+                if x & KEY_SET == 0 {
+                    continue;
                 }
+                // Shifting left restores the sign of the page coordinates and
+                // drops KEY_SET
+                let page = |c: u32| ((c << BITS_FOR_ENTRY_VOXEL_COUNT) as i32) >> 2;
+                out.push(Entry {
+                    page: (page(x), page(y), page(z)),
+                    flags,
+                    occupancy: u64::from(low) | (u64::from(high) << 32),
+                    voxels: std::array::from_fn(|inner| {
+                        voxels[(entry * ENTRY_VOXEL_COUNT as usize + inner) * voxel_words]
+                    }),
+                });
             }
             out
+        }
+
+        /// First key word of every hashmap entry, set ones included.
+        fn key_heads(&self) -> Vec<u32> {
+            let entries: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read_back(
+                self.encoder(),
+                &self.buckets,
+                0,
+                self.buckets.size(),
+            ));
+            let entry_words = (ENTRY_BYTES / 4) as usize;
+            entries
+                .chunks_exact(entry_words)
+                .map(|words| words[0])
+                .collect()
         }
     }
 
@@ -681,7 +717,7 @@ mod test {
             out.sort_by_key(|(k, _)| *k);
             out
         }
-        // A compressed page exists once any of its voxels got constructed
+        // A compressed page exists while any of its voxels is constructed
         fn compressed_pages(&self) -> Option<Vec<(Coord, Vec<u64>)>> {
             if !self.compress {
                 return None;
@@ -689,7 +725,7 @@ mod test {
             let zorder = ZOrder::default();
             let mut out = BTreeMap::new();
             for e in self.entries() {
-                if e.flags & ENTRY_CONSTRUCTED == 0 {
+                if e.occupancy == 0 {
                     continue;
                 }
                 let key = (
@@ -710,7 +746,7 @@ mod test {
         fn pending_results(&self) -> usize {
             self.entries()
                 .iter()
-                .filter(|e| e.flags & ENTRY_TOUCHED != 0)
+                .filter(|e| e.flags & (ENTRY_TOUCHED | ENTRY_MAYBE_EMPTY) != 0)
                 .count()
         }
     }
@@ -762,7 +798,7 @@ mod test {
         let v = new(1.0, 1, 1, 0, 1, false, 100);
         assert_eq!(
             WgpuAccelerated::memory_size(100),
-            v.buckets.size() + v.voxels.size() + v.altered.size()
+            v.buckets.size() + v.voxels.size() + v.altered.size() + v.emptied.size()
         );
     }
 
@@ -822,33 +858,75 @@ mod test {
 
     // ------------------------------------------------------------- hashmap
 
-    #[test]
-    fn hash_collisions_use_lists() {
-        // 6 pages hashed into one of 4 buckets: 2 fit the bucket, the next 3
-        // extend its list into the first entry of each following bucket and
-        // the last one does not fit anymore.
-        const BUCKETS: u32 = 4;
-        let pages: Vec<Coord> = (0..)
+    /// First `count` pages (k, 0, 0) hashed into the first bucket.
+    fn colliding_pages(count: usize, bucket_count: u32) -> Vec<Coord> {
+        (0..)
             .map(|k| (k, 0, 0))
-            .filter(|&page| bucket_of(page, BUCKETS) == 0)
-            .take(6)
-            .collect();
-        let voxel = |(x, y, z): Coord| (4 * x + 1, 4 * y + 1, 4 * z + 1);
+            .filter(|&page| bucket_of(page, bucket_count) == 0)
+            .take(count)
+            .collect()
+    }
+
+    /// Voxel inside `page`.
+    fn voxel_of((x, y, z): Coord) -> Coord {
+        (4 * x + 1, 4 * y + 1, 4 * z + 1)
+    }
+
+    #[test]
+    fn hash_collisions_probe_following_entries() {
+        // 9 pages hashed into the first of 4 buckets: the first 8 take all 8
+        // entries, probing past the bucket, and the last one does not fit.
+        const BUCKETS: u32 = 4;
+        let entries = (u64::from(BUCKETS) * BUCKET_SIZE) as usize;
+        let pages = colliding_pages(entries + 1, BUCKETS);
         let mut v = new(1.0, 1, 1, 0, 1, false, BUCKETS);
-        for &page in &pages[..5] {
-            let (x, y, z) = voxel(page);
-            assert_eq!(from_above(&mut v, voxel(page), 1.0), vec![pi(x, y, z, 1)]);
+        for &page in &pages[..entries] {
+            let (x, y, z) = voxel_of(page);
+            assert_eq!(from_above(&mut v, (x, y, z), 1.0), vec![pi(x, y, z, 1)]);
         }
-        assert!(from_above(&mut v, voxel(pages[5]), 1.0).is_empty());
-        assert_eq!(v.pages().len(), 5);
-        // Every stored page is found again, also through the list
-        for &page in &pages[..5] {
-            let (x, y, z) = voxel(page);
-            assert_eq!(from_above(&mut v, voxel(page), 1.0), vec![pi(x, y, z, 2)]);
+        assert!(from_above(&mut v, voxel_of(pages[entries]), 1.0).is_empty());
+        assert_eq!(v.pages().len(), entries);
+        // Every stored page is found again, also past its bucket
+        for &page in &pages[..entries] {
+            let (x, y, z) = voxel_of(page);
+            assert_eq!(from_above(&mut v, (x, y, z), 1.0), vec![pi(x, y, z, 2)]);
         }
-        let (x, y, z) = voxel(pages[5]);
+        let (x, y, z) = voxel_of(pages[entries]);
         assert_eq!(get_voxel(&v, x, y, z), None);
-        assert_eq!(v.pages().len(), 5);
+        assert_eq!(v.pages().len(), entries);
+    }
+
+    #[test]
+    fn concurrent_inserts_of_colliding_pages() {
+        // Many threads insert the same new pages at once, all of them hashed
+        // into the same bucket: every page must end up in exactly one entry.
+        const BUCKETS: u32 = 8;
+        const PAGES: usize = 8;
+        const PER_PAGE: u32 = 1000;
+        let targets: Vec<Coord> = colliding_pages(PAGES, BUCKETS)
+            .into_iter()
+            .map(voxel_of)
+            .collect();
+        // Interleaved, so neighbouring threads insert different pages
+        let points: Vec<_> = (0..PER_PAGE)
+            .flat_map(|_| {
+                targets
+                    .iter()
+                    .map(|&(x, y, z)| pf(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, 1.0))
+            })
+            .collect();
+        let mut v = new(1.0, 1, 1, 0, 1, false, BUCKETS);
+        let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+        let expected = sorted(
+            targets
+                .iter()
+                .map(|&(x, y, z)| pi(x, y, z, PER_PAGE))
+                .collect(),
+        );
+        assert_eq!(sorted(result), expected);
+        assert_eq!(nonzero_voxels(&v), expected);
+        assert_eq!(v.pages().len(), PAGES);
+        assert_eq!(v.pending_results(), 0);
     }
 
     #[test]
@@ -872,5 +950,76 @@ mod test {
         assert_eq!(nonzero_voxels(&v), result);
         assert_eq!(v.pages().len(), result.len());
         assert_eq!(v.pending_results(), 0);
+    }
+
+    #[test]
+    fn tombstone_keeps_probe_chain() {
+        // Pages A, B and C hashed into the first bucket take entries 0, 1, 2.
+        const BUCKETS: u32 = 4;
+        let pages = colliding_pages(3, BUCKETS);
+        let [a, b, c] = [0, 1, 2].map(|n| voxel_of(pages[n]));
+        let mut v = new(1.0, 1, 1, 0, 1, false, BUCKETS);
+        for (x, y, z) in [a, b, c] {
+            v.set_voxel(x, y, z, 1);
+        }
+        assert!(v.key_heads()[..3].iter().all(|key| key & KEY_SET != 0));
+
+        // Empties B with a ray ending in A: B leaves a tombstone, since C is
+        // stored right after it.
+        let result = along_x(&mut v, b.0, a.0, a.1, a.2, 1.0);
+        assert_eq!(
+            sorted(result),
+            vec![pi(a.0, a.1, a.2, 2), pi(b.0, b.1, b.2, 0)]
+        );
+        assert_eq!(v.key_heads()[1], KEY_REMOVED);
+        assert_eq!(v.pages().len(), 2);
+        assert_eq!(v.pending_results(), 0);
+
+        // C is still found past the tombstone, nothing is inserted twice
+        assert_eq!(from_above(&mut v, c, 1.0), vec![pi(c.0, c.1, c.2, 2)]);
+        assert_eq!(v.pages().len(), 2);
+
+        // Emptying C frees its entry and the tombstone before it
+        let result = along_x(&mut v, c.0, a.0, a.1, a.2, 2.0);
+        assert_eq!(
+            sorted(result),
+            vec![pi(a.0, a.1, a.2, 4), pi(c.0, c.1, c.2, 0)]
+        );
+        let heads = v.key_heads();
+        assert_ne!(heads[0] & KEY_SET, 0);
+        assert_eq!(heads[1..3], [0, 0]);
+        assert_eq!(v.pages().len(), 1);
+        assert_eq!(v.pending_results(), 0);
+    }
+
+    #[test]
+    fn full_table_reused_after_removal() {
+        // Every entry taken, then emptied one by one by rays whose targets do
+        // not fit: no entry is freed before the last one, which frees them all.
+        const BUCKETS: u32 = 4;
+        let entries = (u64::from(BUCKETS) * BUCKET_SIZE) as usize;
+        let pages = colliding_pages(2 * entries, BUCKETS);
+        let mut v = new(1.0, 1, 1, 0, 1, false, BUCKETS);
+        for &page in &pages[..entries] {
+            let (x, y, z) = voxel_of(page);
+            v.set_voxel(x, y, z, 1);
+        }
+        for (n, &page) in pages[..entries].iter().enumerate() {
+            let (x, y, z) = voxel_of(page);
+            // The target lies in the next page, which is not stored
+            assert_eq!(along_x(&mut v, x, x + 4, y, z, 1.0), vec![pi(x, y, z, 0)]);
+            assert_eq!(v.pages().len(), entries - n - 1);
+            if n + 1 < entries {
+                assert_eq!(v.key_heads()[n], KEY_REMOVED);
+            }
+        }
+        assert!(v.key_heads().iter().all(|&key| key == 0));
+        assert_eq!(v.pending_results(), 0);
+
+        for &page in &pages[entries..] {
+            let (x, y, z) = voxel_of(page);
+            assert_eq!(from_above(&mut v, (x, y, z), 1.0), vec![pi(x, y, z, 1)]);
+        }
+        assert_eq!(v.pages().len(), entries);
     }
 }

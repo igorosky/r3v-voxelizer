@@ -6,13 +6,17 @@ var<uniform> params: Params;
 // Raw bits, so it can carry both points (f32) and voxels to set (i32 position, u32 value)
 @group(0) @binding(1)
 var<storage, read> input_points: array<vec4u>;
+// Entries touched during the current call
 @group(0) @binding(2)
-var<storage, read_write> altered: Altered;
+var<storage, read_write> altered: EntryList;
 @group(0) @binding(3)
 var<storage, read_write> output: Output;
-// Sized by BUCKET_COUNT, can't be one struct since only the last member can be runtime sized
+// Entries a voxel of which got zeroed during the current call, removed by `remove_empty` when empty
+@group(0) @binding(4)
+var<storage, read_write> emptied: EntryList;
+// Sized by BUCKET_COUNT * BUCKET_SIZE, can't be one struct since only the last member can be runtime sized
 @group(1) @binding(0)
-var<storage, read_write> buckets: array<Bucket>;
+var<storage, read_write> entries: array<Entry>;
 @group(1) @binding(1)
 var<storage, read_write> voxels: array<Voxel>;
 
@@ -33,8 +37,8 @@ struct Params {
     _padding: u32,
 }
 
-// Entries touched during the current call, every entry is listed at most once
-struct Altered {
+// Every entry is listed at most once
+struct EntryList {
     len: atomic<u32>,
     entries: array<u32>,
 }
@@ -59,41 +63,6 @@ const WORKGROUP_SIZE: u32 = 256;
 fn thread_index(global_id: vec3u, num_workgroups: vec3u) -> u32 {
     return global_id.x + global_id.y * num_workgroups.x * WORKGROUP_SIZE;
 }
-
-// RWLock
-// Locks of the buckets are accessed directly by bucket index,
-// since naga does not support storage pointers as function arguments
-const LOCK_FREE: u32 = 0;
-const LOCK_WRITE_BIT: u32 = 31;
-const LOCK_WRITE_BIT_MASK: u32 = 1 << LOCK_WRITE_BIT;
-const LOCK_UNLOCK_BIT_MASK: u32 = ~LOCK_WRITE_BIT_MASK;
-
-// Tries to lock for reading
-// returns whether succeed, fails if locked for writing
-@must_use
-fn try_lock_read(bucket: u32) -> bool {
-    let prev = atomicAdd(&buckets[bucket].lock, 1);
-    if (prev & LOCK_WRITE_BIT_MASK) != 0 {
-        atomicSub(&buckets[bucket].lock, 1);
-        return false;
-    }
-    return true;
-}
-fn unlock_read(bucket: u32) {
-    atomicSub(&buckets[bucket].lock, 1);
-}
-
-// Tries to lock for writing
-// returns whether succeed, fails if locked for reading or may fail spuriously
-@must_use
-fn try_lock_write(bucket: u32) -> bool {
-    // No need to handle spurious fail since caller will have to have retry mechanism anyway
-    return atomicCompareExchangeWeak(&buckets[bucket].lock, LOCK_FREE, LOCK_WRITE_BIT_MASK).exchanged;
-}
-fn unlock_write(bucket: u32) {
-    atomicAnd(&buckets[bucket].lock, LOCK_UNLOCK_BIT_MASK);
-}
-// End of RWLock
 
 // Z-Order
 @must_use
@@ -120,16 +89,30 @@ fn get_z_order(pos: vec3i) -> u32 {
 // https://niessnerlab.org/papers/2013/4hashing/niessner2013hashing.pdf
 // https://arxiv.org/pdf/1805.03709
 
+// WGSL atomics are relaxed and there is no device scope fence, so nothing orders accesses
+// to different memory locations made by different workgroups (a lock can't protect plain data)
+// The hashmap relies only on:
+// - atomicity of a read-modify-write of a single location
+// - visibility of everything written by a dispatch to the following ones
+// During a dispatch every key word is written at most once, by the only compare exchange that finds it unset,
+// so once set it is final and all threads inserting the same key make the same decisions
+// Open addressing with linear probing, entries are never moved and are removed only by
+// `remove_empty` and `reclaim_removed`, which insert nothing,
+// so during any other dispatch an entry once found can be used without any synchronization
+// A removed entry is left as a tombstone, which matches no key, so lookups probe past it,
+// and is freed once no stored key can be probed past it (see `reclaim_removed`)
+// No thread ever waits for another one
+
 const BITS_FOR_ENTRY_VOXEL_COUNT: u32 = 2;
 const BITS_FOR_ENTRY_VOXEL_MASK: u32 = (1u << BITS_FOR_ENTRY_VOXEL_COUNT) - 1;
 const ENTRY_VOXEL_COUNT: u32 = 1u << (3 * BITS_FOR_ENTRY_VOXEL_COUNT);
+// Entries of a bucket are the first ones probed for its keys
 const BUCKET_SIZE: u32 = 2;
-// How many buckets following the full one are searched for a free entry when extending its list
-const MAX_LIST_PROBE: u32 = 64;
+// How many entries are probed for a key
+const MAX_PROBE: u32 = 128;
 
 // Returned instead of an entry index
 const NO_ENTRY: u32 = 0xFFFFFFFFu;
-const ENTRY_CONTENDED: u32 = 0xFFFFFFFEu;
 
 @must_use
 fn entry_count() -> u32 {
@@ -142,29 +125,25 @@ fn voxel_pos(entry: u32, zorder: u32) -> u32 {
     return (entry << (BITS_FOR_ENTRY_VOXEL_COUNT * 3)) | zorder;
 }
 
-const ENTRY_OCCUPIED_MASK: u32 = u32(1) << u32(31);
-const ENTRY_OFFSET_MASK: u32 = ~ENTRY_OCCUPIED_MASK;
+// Key word of a free entry
+const KEY_UNSET: u32 = 0;
+// Set in every written key word, hashable positions take only 30 bits
+const KEY_SET: u32 = 1u << 31;
+// First key word of a removed entry (tombstone), KEY_SET is clear so it matches no key
+const KEY_REMOVED: u32 = 1;
 // Entry has been modified during the current call (it is listed in `altered`)
 const ENTRY_TOUCHED: u32 = 1;
-// Any voxel of the entry has ever been constructed
-const ENTRY_CONSTRUCTED: u32 = 2;
+// A voxel of the entry has been zeroed during the current call (it is listed in `emptied`)
+const ENTRY_MAYBE_EMPTY: u32 = 2;
 struct Entry {
-    // Not a vec3i to save up 4 bytes on padding
-    x: u32,
-    y: u32,
-    z: u32,
-    // Occupied bit + list offset (see `list_entry`)
-    // In the last entry of a bucket it is the head of the bucket's list
-    // In an entry being a list element it points to the next element
-    offset: atomic<u32>,
-    // ENTRY_TOUCHED | ENTRY_CONSTRUCTED
+    // Hashable position (x, y, z) | KEY_SET (see `claim_key_word`), all KEY_UNSET in a free entry
+    // and KEY_REMOVED, KEY_UNSET, KEY_UNSET in a tombstone
+    // Not a vec3u to save up 4 bytes on padding
+    key: array<atomic<u32>, 3>,
+    // ENTRY_TOUCHED | ENTRY_MAYBE_EMPTY
     flags: atomic<u32>,
     // Constructed voxels, bit `x + 4y + 16z`, first word holds z = 0..1, second z = 2..3
     occupancy: array<u32, 2>,
-}
-struct Bucket {
-    lock: atomic<u32>,
-    entries: array<Entry, BUCKET_SIZE>,
 }
 
 @must_use
@@ -183,205 +162,106 @@ fn hash(pos: vec3u) -> u32 {
 }
 
 @must_use
-fn entry_index(bucket: u32, i: u32) -> u32 {
-    return bucket * BUCKET_SIZE + i;
+fn probe_count() -> u32 {
+    return min(MAX_PROBE, entry_count());
 }
 
-// List offsets are relative to the first entry of the list's home bucket, 0 means end of the list
+// Entry probed in the `probe`-th step for keys of `bucket`
 @must_use
-fn list_entry(bucket: u32, offset: u32) -> u32 {
-    return (entry_index(bucket, 0) + offset) % entry_count();
+fn probed_entry(bucket: u32, probe: u32) -> u32 {
+    return (bucket * BUCKET_SIZE + probe) % entry_count();
 }
 
+// Writes `value` to the key word unless it is already set
+// Returns the value the word holds afterwards, which is final
+// Entries are accessed by index, since naga does not support storage pointers as function arguments
 @must_use
-fn is_occupied(bucket: u32, i: u32) -> bool {
-    return (atomicLoad(&buckets[bucket].entries[i].offset) & ENTRY_OCCUPIED_MASK) != 0;
-}
-
-@must_use
-fn next_offset(bucket: u32, i: u32) -> u32 {
-    return atomicLoad(&buckets[bucket].entries[i].offset) & ENTRY_OFFSET_MASK;
-}
-
-@must_use
-fn occupied_contains(bucket: u32, i: u32, hashable_pos: vec3u) -> bool {
-    return buckets[bucket].entries[i].x == hashable_pos.x //
-    && buckets[bucket].entries[i].y == hashable_pos.y //
-    && buckets[bucket].entries[i].z == hashable_pos.z;
-}
-
-@must_use
-fn contains(bucket: u32, i: u32, hashable_pos: vec3u) -> bool {
-    return is_occupied(bucket, i) && occupied_contains(bucket, i, hashable_pos);
-}
-
-fn set_pos(bucket: u32, i: u32, hashable_pos: vec3u) {
-    buckets[bucket].entries[i].x = hashable_pos.x;
-    buckets[bucket].entries[i].y = hashable_pos.y;
-    buckets[bucket].entries[i].z = hashable_pos.z;
-}
-
-// Returns index of the entry containing `hashable_pos` or NO_ENTRY
-// Caller must hold a lock (read or write) of `bucket`
-@must_use
-fn find_entry(bucket: u32, hashable_pos: vec3u) -> u32 {
-    // Check the bucket
-    for (var i = 0u; i < BUCKET_SIZE; i++) {
-        if contains(bucket, i, hashable_pos) {
-            return entry_index(bucket, i);
-        }
+fn claim_key_word(entry: u32, word: u32, value: u32) -> u32 {
+    let key_word = &entries[entry].key[word];
+    // A set word never changes, so only an unset one needs the exchange
+    let current = atomicLoad(key_word);
+    if current != KEY_UNSET {
+        return current;
     }
+    var result = atomicCompareExchangeWeak(key_word, KEY_UNSET, value);
+    // Retried only when it failed spuriously, otherwise some other thread has set the word
+    while !result.exchanged && result.old_value == KEY_UNSET {
+        result = atomicCompareExchangeWeak(key_word, KEY_UNSET, value);
+    }
+    if result.exchanged {
+        return value;
+    }
+    return result.old_value;
+}
 
-    // Not in the bucket check a link list
-    var offset = next_offset(bucket, BUCKET_SIZE - 1);
-    while offset != 0 {
-        let entry = list_entry(bucket, offset);
-        let list_elem_bucket = entry / BUCKET_SIZE;
-        let i = entry % BUCKET_SIZE;
-        // Since it is pointed to it must contain some element
-        if occupied_contains(list_elem_bucket, i, hashable_pos) {
+// Returns index of the entry containing `pos`, it is inserted if it is not stored yet
+// Returns NO_ENTRY if there is no space left for it
+// Key words are claimed in order (x, y, z) and only while the previous ones match,
+// so whoever sets a word goes on to the next one and no entry is left partially written
+// Since every word is set once, all threads inserting the same key end up in the same entry
+@must_use
+fn find_or_insert(pos: vec3i) -> u32 {
+    let hashable_pos = get_hashable_pos(pos);
+    let key = hashable_pos | vec3u(KEY_SET);
+    let bucket = hash(hashable_pos);
+    for (var probe = 0u; probe < probe_count(); probe++) {
+        let entry = probed_entry(bucket, probe);
+        // Not a single condition, so the order of claims does not depend on short-circuiting
+        if claim_key_word(entry, 0, key.x) != key.x {
+            continue;
+        }
+        if claim_key_word(entry, 1, key.y) != key.y {
+            continue;
+        }
+        if claim_key_word(entry, 2, key.z) == key.z {
             return entry;
         }
-        offset = next_offset(list_elem_bucket, i);
-    }
-    return NO_ENTRY;
-}
-
-// Whether `bucket` has a free entry which can become an element of another bucket's list
-@must_use
-fn has_free_list_slot(bucket: u32) -> bool {
-    for (var i = 0u; i < BUCKET_SIZE - 1; i++) {
-        if !is_occupied(bucket, i) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Stores `hashable_pos` in a free entry of `bucket` or, if it is full, extends the bucket's list
-// Returns index of the new entry, NO_ENTRY if there is no space left
-// or ENTRY_CONTENDED if it failed due to contention and should be retried
-// Caller must hold the write lock of `bucket` and make sure `hashable_pos` is not stored yet
-@must_use
-fn insert_entry(bucket: u32, hashable_pos: vec3u) -> u32 {
-    // Check the bucket
-    for (var i = 0u; i < BUCKET_SIZE; i++) {
-        if !is_occupied(bucket, i) {
-            set_pos(bucket, i, hashable_pos);
-            // Or instead of store, so the list head (in case of the last entry) is not lost
-            atomicOr(&buckets[bucket].entries[i].offset, ENTRY_OCCUPIED_MASK);
-            return entry_index(bucket, i);
-        }
-    }
-
-    // Bucket is full - extend its list with a free entry of one of the following buckets
-    // Last entries are skipped, since their offset is reserved for their own bucket's list
-    // Bucket that gets the entry is write locked, so its readers never see a half written entry
-    // It only tries to lock, so it can't deadlock
-    // Probing is limited to the other buckets, `bucket` itself is already locked by the caller
-    let probes = min(MAX_LIST_PROBE, BUCKET_COUNT - 1);
-    var contended = false;
-    for (var probe = 1u; probe <= probes; probe++) {
-        let other = (bucket + probe) % BUCKET_COUNT;
-        // Entries are never freed, so a bucket without a free entry is skipped without locking it
-        // Otherwise, once the table is full, threads would keep failing on each other's locks forever
-        if !has_free_list_slot(other) {
-            continue;
-        }
-        if !try_lock_write(other) {
-            contended = true;
-            continue;
-        }
-        for (var i = 0u; i < BUCKET_SIZE - 1; i++) {
-            if !is_occupied(other, i) {
-                set_pos(other, i, hashable_pos);
-                // New element becomes the head of the list
-                let head = &buckets[bucket].entries[BUCKET_SIZE - 1].offset;
-                atomicStore(&buckets[other].entries[i].offset, //
-                ENTRY_OCCUPIED_MASK | (atomicLoad(head) & ENTRY_OFFSET_MASK));
-                unlock_write(other);
-                atomicStore(head, ENTRY_OCCUPIED_MASK | (probe * BUCKET_SIZE + i));
-                return entry_index(other, i);
-            }
-        }
-        unlock_write(other);
-    }
-    if contended {
-        return ENTRY_CONTENDED;
     }
     return NO_ENTRY;
 }
 
 // Returns index of the entry containing `pos` or NO_ENTRY if it is not stored
-// or ENTRY_CONTENDED if it failed due to contention and has to be retried
+// Valid only when nothing is inserted during the same dispatch, every entry is then either free or fully written
+// No stored key is ever left behind a free entry, so all entries probed before the one containing `pos`
+// are occupied or tombstones
 @must_use
 fn find_existing(pos: vec3i) -> u32 {
     let hashable_pos = get_hashable_pos(pos);
+    let key = hashable_pos | vec3u(KEY_SET);
     let bucket = hash(hashable_pos);
-    if !try_lock_read(bucket) {
-        return ENTRY_CONTENDED;
+    for (var probe = 0u; probe < probe_count(); probe++) {
+        let entry = probed_entry(bucket, probe);
+        let x = atomicLoad(&entries[entry].key[0]);
+        if x == KEY_UNSET {
+            return NO_ENTRY;
+        }
+        if x == key.x //
+        && atomicLoad(&entries[entry].key[1]) == key.y //
+        && atomicLoad(&entries[entry].key[2]) == key.z {
+            return entry;
+        }
     }
-    let found = find_entry(bucket, hashable_pos);
-    unlock_read(bucket);
-    return found;
-}
-
-// Returns index of the entry containing `pos`, it is inserted if it is not stored yet
-// Returns NO_ENTRY if there is no space left for it
-// or ENTRY_CONTENDED if it failed due to contention and has to be retried
-@must_use
-fn find_or_insert(pos: vec3i) -> u32 {
-    let hashable_pos = get_hashable_pos(pos);
-    let bucket = hash(hashable_pos);
-    if !try_lock_write(bucket) {
-        return ENTRY_CONTENDED;
-    }
-
-    // Anything that has been learned while lookup should not be considered
-    // since while unlocking/locking everything could have changed
-    var entry = find_entry(bucket, hashable_pos);
-    if entry == NO_ENTRY {
-        entry = insert_entry(bucket, hashable_pos);
-    }
-    unlock_write(bucket);
-    return entry;
-}
-
-// Returns index of the entry containing `pos`, it is inserted if it is not stored yet
-// Returns NO_ENTRY if there is no space left for it
-// Retries on contention, every failed attempt means that some other thread holds the lock and makes progress
-@must_use
-fn get_or_insert(pos: vec3i) -> u32 {
-    var entry = find_existing(pos);
-    while entry == ENTRY_CONTENDED {
-        entry = find_existing(pos);
-    }
-    if entry != NO_ENTRY {
-        return entry;
-    }
-    // Lock can't be escalated to write since this may cause a deadlock, so it is unlocked and locked
-    // Once the entry is known to be missing only the write lock is retried,
-    // taking the read lock again on every retry would keep starving the writers of the bucket
-    entry = find_or_insert(pos);
-    while entry == ENTRY_CONTENDED {
-        entry = find_or_insert(pos);
-    }
-    return entry;
+    return NO_ENTRY;
 }
 
 // Lists the entry in `altered` when it is touched for the first time during the current call
 fn mark_touched(entry: u32) {
-    let flags = &buckets[entry / BUCKET_SIZE].entries[entry % BUCKET_SIZE].flags;
-    if (atomicOr(flags, ENTRY_TOUCHED) & ENTRY_TOUCHED) == 0 {
+    if (atomicOr(&entries[entry].flags, ENTRY_TOUCHED) & ENTRY_TOUCHED) == 0 {
         altered.entries[atomicAdd(&altered.len, 1)] = entry;
+    }
+}
+
+// Lists the entry in `emptied` when any of its voxels is zeroed for the first time during the current call
+fn mark_maybe_empty(entry: u32) {
+    if (atomicOr(&entries[entry].flags, ENTRY_MAYBE_EMPTY) & ENTRY_MAYBE_EMPTY) == 0 {
+        emptied.entries[atomicAdd(&emptied.len, 1)] = entry;
     }
 }
 
 // Value is dropped if there is no space left for it
 fn add_val(pos: vec3i, val: StoredValue) {
-    let entry = get_or_insert(pos);
+    let entry = find_or_insert(pos);
     // NO_ENTRY at this point means that there is no space left
-    // Entries are never moved nor removed, so once found the voxel can be accessed without a lock
     if entry != NO_ENTRY && val != 0 {
         atomicAdd(&voxels[voxel_pos(entry, get_z_order(pos))].value, val);
         mark_touched(entry);
@@ -401,39 +281,20 @@ fn atomic_sat_sub(voxel: u32, val: u32) -> u32 {
     return current;
 }
 
-fn try_remove(bucket: u32, hash_pos: u32, i: u32) {
-// NOOP for now - particularly in mostly static env it is not that necessary
-// Also it would require to introduce some new variable to bucket element - like non_zero_voxels_count
-// while !try_lock_write(bucket) { }
-// if atomicLoad(&buckets[bucket].entries[i].offset) & ENTRY_OCCUPIED_MASK == 0 { }
-// unlock_write(bucket);
-}
-
-// Returns false if it failed due to contention and has to be retried
-@must_use
-fn sub_val_if_exists(pos: vec3i, val: StoredValue) -> bool {
-    let hashable_pos = get_hashable_pos(pos);
-    let bucket = hash(hashable_pos);
-    if !try_lock_read(bucket) {
-        return false;
+// Must not be used during a dispatch that inserts (see `find_existing`)
+fn sub_val_if_exists(pos: vec3i, val: StoredValue) {
+    let entry = find_existing(pos);
+    if entry == NO_ENTRY {
+        return;
     }
-
-    let entry = find_entry(bucket, hashable_pos);
-    var just_zeroed = false;
-    if entry != NO_ENTRY {
-        let prev = atomic_sat_sub(voxel_pos(entry, get_z_order(pos)), val);
-        if prev != 0 && val != 0 {
-            mark_touched(entry);
-        }
-        just_zeroed = prev != 0 && prev <= val;
+    let prev = atomic_sat_sub(voxel_pos(entry, get_z_order(pos)), val);
+    if prev != 0 && val != 0 {
+        mark_touched(entry);
     }
-    unlock_read(bucket);
+    let just_zeroed = prev != 0 && prev <= val;
     if just_zeroed {
-    // TODO
+        mark_maybe_empty(entry);
     }
-    // No lock failed - not finding an entry just means that such entry does not exist
-    // so, everything is fine
-    return true;
 }
 
 // End of Hashmap implementation
@@ -446,11 +307,7 @@ fn closest_boundary(dir: vec3i, position: vec3f, ray: vec3f) -> vec3f {
     return (boundary - position) / ray;
 }
 
-// Hits the voxel, retrying until the bucket's lock is taken
-fn hit(pos: vec3i, val: StoredValue) {
-    while !sub_val_if_exists(pos, val) { }
-}
-
+// Inserts nothing, so it can use `sub_val_if_exists`
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgroups) num_workgroups: vec3u) {
     let index = thread_index(global_id, num_workgroups);
@@ -477,21 +334,21 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
     // x
     case 3: {
         while target_point.x != sensor_pos.x {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             sensor_pos.x += dir.x;
         }
     }
     // y
     case 5: {
         while target_point.y != sensor_pos.y {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             sensor_pos.y += dir.y;
         }
     }
     // z
     case 6: {
         while target_point.z != sensor_pos.z {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             sensor_pos.z += dir.z;
         }
     }
@@ -502,7 +359,7 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
         let delta = 1.0 / abs(ray.xy);
         var t_max = closest_boundary(dir, sensor_pos_divided, ray).xy;
         for (var i = 0; i < steps; i++) {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.y {
                 sensor_pos.x += dir.x;
                 t_max.x += delta.x;
@@ -517,7 +374,7 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
         let delta = 1.0 / abs(ray.xz);
         var t_max = closest_boundary(dir, sensor_pos_divided, ray).xz;
         for (var i = 0; i < steps; i++) {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.y {
                 sensor_pos.x += dir.x;
                 t_max.x += delta.x;
@@ -532,7 +389,7 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
         let delta = 1.0 / abs(ray.yz);
         var t_max = closest_boundary(dir, sensor_pos_divided, ray).yz;
         for (var i = 0; i < steps; i++) {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.y {
                 sensor_pos.y += dir.y;
                 t_max.x += delta.x;
@@ -548,7 +405,7 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
         let delta = 1.0 / abs(ray);
         var t_max = closest_boundary(dir, sensor_pos_divided, ray);
         for (var i = 0; i < steps; i++) {
-            hit(sensor_pos, hit_value);
+            sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.z {
                 if t_max.x < t_max.y {
                     sensor_pos.x += dir.x;
@@ -599,16 +456,14 @@ fn collect(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgro
     }
     let entry = altered.entries[params.first + index / 2];
     let half = index % 2;
-    let bucket = entry / BUCKET_SIZE;
-    let i = entry % BUCKET_SIZE;
     // Shifting left restores the voxel coordinates (with the sign) from the hashable position
-    let origin = bitcast<vec3i>(vec3u(buckets[bucket].entries[i].x, //
-    buckets[bucket].entries[i].y, //
-    buckets[bucket].entries[i].z) << vec3u(BITS_FOR_ENTRY_VOXEL_COUNT));
+    // and drops KEY_SET
+    let origin = bitcast<vec3i>(vec3u(atomicLoad(&entries[entry].key[0]), //
+    atomicLoad(&entries[entry].key[1]), //
+    atomicLoad(&entries[entry].key[2])) << vec3u(BITS_FOR_ENTRY_VOXEL_COUNT));
 
-    var pack = buckets[bucket].entries[i].occupancy[half];
+    var pack = entries[entry].occupancy[half];
     var changed = false;
-    var constructed = false;
     for (var bit = 0u; bit < ENTRY_VOXEL_COUNT / 2; bit++) {
         let local = vec3i(vec3u(bit & 3,(bit >> 2) & 3,(bit >> 4) | (half << 1)));
         let voxel = voxel_pos(entry, get_z_order(local));
@@ -624,7 +479,6 @@ fn collect(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgro
         } else if prev < params.construct_threshold && value >= params.construct_threshold {
             pack |= mask;
             changed = true;
-            constructed = true;
         } else if prev > params.destroy_threshold && value <= params.destroy_threshold {
             if (pack & mask) == 0 {
                 atomicStore(&output.error, 1);
@@ -635,14 +489,79 @@ fn collect(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgro
     }
 
     if changed {
-        buckets[bucket].entries[i].occupancy[half] = pack;
+        entries[entry].occupancy[half] = pack;
         append_output(origin + vec3i(0, 0, i32(half << 1)), pack);
     }
-    if constructed {
-        atomicOr(&buckets[bucket].entries[i].flags, ENTRY_CONSTRUCTED);
-    }
     if half == 0 {
-        atomicAnd(&buckets[bucket].entries[i].flags, ~ENTRY_TOUCHED);
+        atomicAnd(&entries[entry].flags, ~ENTRY_TOUCHED);
+    }
+}
+
+// One thread per entry listed in `emptied`, runs after `collect`
+// Removes the entry when it is still empty (`add_point` may have refilled it), leaving a tombstone
+// `collect` made every `prev` equal to its value, so an entry with all values 0 and no voxel constructed
+// is all zero and only its key and flags need to be reset to be free once reclaimed
+// Only the owning thread touches its entry, so no synchronization is needed
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn remove_empty(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgroups) num_workgroups: vec3u) {
+    let index = thread_index(global_id, num_workgroups);
+    if index >= atomicLoad(&emptied.len) {
+        return;
+    }
+    let entry = emptied.entries[index];
+    var empty = (entries[entry].occupancy[0] | entries[entry].occupancy[1]) == 0;
+    for (var zorder = 0u; empty && zorder < ENTRY_VOXEL_COUNT; zorder++) {
+        empty = atomicLoad(&voxels[voxel_pos(entry, zorder)].value) == 0;
+    }
+    if !empty {
+        atomicAnd(&entries[entry].flags, ~ENTRY_MAYBE_EMPTY);
+        return;
+    }
+    atomicStore(&entries[entry].key[1], KEY_UNSET);
+    atomicStore(&entries[entry].key[2], KEY_UNSET);
+    atomicStore(&entries[entry].flags, 0);
+    atomicStore(&entries[entry].key[0], KEY_REMOVED);
+}
+
+// One thread per entry listed in `emptied`, runs after `remove_empty`, so every tombstone is visible
+// Frees tombstones no stored key can be probed past, that is the ones followed only by tombstones
+// up to a free entry or for `probe_count() - 1` entries (no key is stored further from its bucket)
+// Nothing is inserted and the only change is a tombstone getting free, so an entry seen as a tombstone
+// or free stays so, whatever order changes made by other threads are seen in,
+// and no stored key is ever left behind a free entry
+@compute @workgroup_size(WORKGROUP_SIZE)
+fn reclaim_removed(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgroups) num_workgroups: vec3u) {
+    let index = thread_index(global_id, num_workgroups);
+    if index >= atomicLoad(&emptied.len) {
+        return;
+    }
+    let entry = emptied.entries[index];
+    if atomicLoad(&entries[entry].key[0]) != KEY_REMOVED {
+        return;
+    }
+    // Number of entries, starting with this one, that get free
+    var count = 1u;
+    for (var i = 1u; i < probe_count(); i++) {
+        let key = atomicLoad(&entries[(entry + i) % entry_count()].key[0]);
+        if key == KEY_UNSET {
+            count = i;
+            break;
+        }
+        if key != KEY_REMOVED {
+            // A stored key may be probed past this tombstone
+            return;
+        }
+    }
+    for (var i = 0u; i < count; i++) {
+        atomicStore(&entries[(entry + i) % entry_count()].key[0], KEY_UNSET);
+    }
+    // Tombstones right before a free entry are free as well
+    for (var i = 1u; i < probe_count(); i++) {
+        let previous = (entry + entry_count() - i) % entry_count();
+        if atomicLoad(&entries[previous].key[0]) != KEY_REMOVED {
+            break;
+        }
+        atomicStore(&entries[previous].key[0], KEY_UNSET);
     }
 }
 
@@ -656,7 +575,7 @@ fn set_voxels(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_work
     }
     let input = input_points[index];
     let pos = bitcast<vec3i>(input.xyz);
-    let entry = get_or_insert(pos);
+    let entry = find_or_insert(pos);
     if entry != NO_ENTRY {
         let voxel = voxel_pos(entry, get_z_order(pos));
         atomicStore(&voxels[voxel].value, input.w);

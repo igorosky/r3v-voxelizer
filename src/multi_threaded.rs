@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use rayon::{
     ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
     iter::{IntoParallelRefIterator, ParallelBridge, ParallelIterator},
@@ -24,6 +24,8 @@ pub struct MultiThreaded {
     compressed_voxels:
         Option<DashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_COMPRESSED_ZORDER)]>>,
     result: DashMap<PagedIndex, u32>,
+    // Pages a voxel of which got zeroed during the current call
+    maybe_empty: DashSet<ThreeDim>,
     resolution: f32,
     hit_multiplier: u32,
     target_multiplier: u32,
@@ -48,6 +50,7 @@ impl MultiThreaded {
             voxels: DashMap::new(),
             compressed_voxels: if compress { Some(DashMap::new()) } else { None },
             result: DashMap::new(),
+            maybe_empty: DashSet::new(),
             resolution,
             hit_multiplier,
             target_multiplier,
@@ -85,7 +88,9 @@ impl Voxelizer for MultiThreaded {
                 .for_each(|point| self.add_voxel(&point));
         });
         let map = std::mem::replace(&mut self.result, DashMap::new());
-        self.thread_pool.install(|| {
+        // Compressed pages a word of which got zeroed
+        let emptied_compressed = DashSet::new();
+        let result = self.thread_pool.install(|| {
             let iter = map
                 .into_iter()
                 .par_bridge()
@@ -151,6 +156,9 @@ impl Voxelizer for MultiThreaded {
                             .expect("It must have existed if it is destroyed")[idx2()];
                         *v ^= 1 << x << (y << 2) << (z << 4);
                         changed(*v);
+                        if *v == 0 {
+                            emptied_compressed.insert(idx());
+                        }
                     }
                 });
                 compressed_dedup
@@ -161,7 +169,9 @@ impl Voxelizer for MultiThreaded {
                 iter.map(|(idx, _, voxel)| self.point_from_index(idx, voxel))
                     .collect()
             }
-        })
+        });
+        self.remove_emptied(emptied_compressed);
+        result
     }
 }
 
@@ -214,7 +224,50 @@ impl MultiThreaded {
                     vacant_entry.insert(v[idx.1]);
                 }
             }
-            v[idx.1] = v[idx.1].saturating_sub(point.i);
+            let prev = v[idx.1];
+            v[idx.1] = prev.saturating_sub(point.i);
+            if prev != 0 && v[idx.1] == 0 {
+                self.maybe_empty.insert(idx.0);
+            }
+        }
+    }
+    /// Key of the compressed page holding the bits of `page` and index of
+    /// their word in it.
+    #[inline]
+    fn compressed_index(&self, page: ThreeDim) -> PagedIndex {
+        (
+            (
+                page.0 >> BITS_FOR_COMPRESSED_ZORDER,
+                page.1 >> BITS_FOR_COMPRESSED_ZORDER,
+                page.2 >> BITS_FOR_COMPRESSED_ZORDER,
+            ),
+            self.zorder.index_of([
+                (page.0 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
+                (page.1 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
+                (page.2 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
+            ]) as usize,
+        )
+    }
+    /// Removes pages zeroed during the call that are empty (all voxels 0 and
+    /// none constructed) and compressed pages from `emptied_compressed`
+    /// that are empty (all words 0).
+    fn remove_emptied(&mut self, emptied_compressed: DashSet<ThreeDim>) {
+        for page in std::mem::take(&mut self.maybe_empty) {
+            let (key, inner) = self.compressed_index(page);
+            let constructed = self
+                .compressed_voxels
+                .as_ref()
+                .and_then(|compressed_voxels| compressed_voxels.get(&key))
+                .is_some_and(|words| words[inner] != 0);
+            if !constructed {
+                self.voxels
+                    .remove_if(&page, |_, voxels| voxels.iter().all(|&v| v == 0));
+            }
+        }
+        if let Some(compressed_voxels) = self.compressed_voxels.as_ref() {
+            for key in emptied_compressed {
+                compressed_voxels.remove_if(&key, |_, words| words.iter().all(|&w| w == 0));
+            }
         }
     }
     #[inline]
@@ -442,7 +495,7 @@ mod test {
             Some(out)
         }
         fn pending_results(&self) -> usize {
-            self.result.len()
+            self.result.len() + self.maybe_empty.len()
         }
     }
 
