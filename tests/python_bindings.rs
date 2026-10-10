@@ -4,8 +4,6 @@
 //! name of the extension module, into a temporary directory and imported from
 //! there. Every Python test case runs in its own interpreter process, so a
 //! crash fails only that case.
-//!
-//! Also checks that the bindings build with the `python` feature alone.
 
 use std::{
     env::{self, consts},
@@ -152,36 +150,10 @@ fn python() -> OsString {
         .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into())
 }
 
-/// `--features python` on top of the default features is what building just
-/// the extension module (e.g. `maturin build --features python`) does.
-fn python_feature_alone() -> Result<(), Failed> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // A target directory of its own, so this does not contend with (or
-    // rebuild) the artifacts of the test run itself.
-    let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("python-feature-check");
-    let output = Command::new(env!("CARGO"))
-        .args(["check", "--quiet", "--lib", "--features", "python"])
-        .args(["--message-format", "short", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", target_dir)
-        .output()
-        .map_err(|e| format!("failed to run cargo: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "`cargo check --features python` failed ({}):\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
-    }
-}
-
 fn main() {
     let args = Arguments::from_args();
     let python_tests = Arc::new(PythonTests::setup());
-    let mut trials: Vec<Trial> = python_tests
+    let trials = python_tests
         .list_cases()
         .into_iter()
         .map(|name| {
@@ -189,10 +161,6 @@ fn main() {
             Trial::test(name.clone(), move || python_tests.run_case(&name))
         })
         .collect();
-    trials.push(Trial::test(
-        "build::python_feature_alone",
-        python_feature_alone,
-    ));
     let conclusion = libtest_mimic::run(&args, trials);
     let _ = fs::remove_dir_all(&python_tests.module_dir);
     conclusion.exit();

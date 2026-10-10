@@ -466,7 +466,7 @@ pub(crate) fn index_roundtrip<T: TestVoxelizer>() {
 
 pub(crate) fn inner_index_bijective_within_page<T: TestVoxelizer>() {
     let v = plain::<T>();
-    let mut seen = vec![false; PAGE_LEN];
+    let mut seen = [false; PAGE_LEN];
     for x in 0..4 {
         for y in 0..4 {
             for z in 0..4 {

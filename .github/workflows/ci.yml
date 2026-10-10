@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  test:
+    name: clippy + tests (${{ matrix.group }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, c, python, js]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.group == 'js' && 'wasm32-unknown-unknown' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.group }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Runners have no GPU: the wgpu tests run on lavapipe (Mesa's CPU
+      # Vulkan driver). Pinned to the noble release version: lavapipe from
+      # noble-updates (Mesa 25.2.8) segfaults inside the JIT compiled shader
+      # as soon as one dispatch has more than one point. Mesa 22.3 to 25.0
+      # and 26.2 pass.
+      - name: Install lavapipe
+        if: matrix.group == 'core'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends --allow-downgrades \
+            libvulkan1 mesa-vulkan-drivers=24.0.5-1ubuntu1
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json)
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
+      - name: Install wasm-pack
+        if: matrix.group == 'js'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - run: ./test.sh ${{ matrix.group }}
+
+      - name: Generated headers are up to date
+        if: matrix.group == 'c'
+        run: git diff --exit-code -- bindings/
