@@ -112,31 +112,42 @@ PointI pi(int32_t x, int32_t y, int32_t z, uint32_t i)
     return p;
 }
 
-void *make_capped(const Impl *impl, float resolution, uint32_t hit_multiplier,
-                  uint32_t target_multiplier, uint32_t destroy_threshold,
-                  uint32_t construct_threshold, uint32_t max_value, bool compress)
+void *make_full(const Impl *impl, float resolution, float intensity_multiplier,
+                uint32_t hit_multiplier, uint32_t target_multiplier, uint32_t destroy_threshold,
+                uint32_t construct_threshold, uint32_t max_value, bool compress)
 {
     void *voxelizer = NULL;
     switch (impl->kind)
     {
     case IMPL_SINGLE:
-        voxelizer = create_single_threaded_voxelizer(resolution, hit_multiplier, target_multiplier,
+        voxelizer = create_single_threaded_voxelizer(resolution, intensity_multiplier,
+                                                     hit_multiplier, target_multiplier,
                                                      destroy_threshold, construct_threshold,
                                                      max_value, compress);
         break;
     case IMPL_MULTI:
-        voxelizer = create_multi_threaded_voxelizer(resolution, hit_multiplier, target_multiplier,
+        voxelizer = create_multi_threaded_voxelizer(resolution, intensity_multiplier,
+                                                    hit_multiplier, target_multiplier,
                                                     destroy_threshold, construct_threshold,
                                                     max_value, compress, impl->threads);
         break;
     case IMPL_WGPU:
-        voxelizer = create_wgpu_voxelizer(resolution, hit_multiplier, target_multiplier,
-                                          destroy_threshold, construct_threshold, max_value,
-                                          compress, WGPU_TEST_BUCKETS);
+        voxelizer = create_wgpu_voxelizer(resolution, intensity_multiplier, hit_multiplier,
+                                          target_multiplier, destroy_threshold,
+                                          construct_threshold, max_value, compress,
+                                          WGPU_TEST_BUCKETS);
         break;
     }
     CHECK(voxelizer != NULL);
     return voxelizer;
+}
+
+void *make_capped(const Impl *impl, float resolution, uint32_t hit_multiplier,
+                  uint32_t target_multiplier, uint32_t destroy_threshold,
+                  uint32_t construct_threshold, uint32_t max_value, bool compress)
+{
+    return make_full(impl, resolution, 1.0f, hit_multiplier, target_multiplier,
+                     destroy_threshold, construct_threshold, max_value, compress);
 }
 
 void *make(const Impl *impl, float resolution, uint32_t hit_multiplier,

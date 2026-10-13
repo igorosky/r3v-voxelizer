@@ -83,8 +83,10 @@ mod r3v_voxelizer {
     #[pyo3::pymethods]
     impl SingleThreaded {
         #[new]
+        #[expect(clippy::too_many_arguments)]
         fn new(
             resolution: f32,
+            intensity_multiplier: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
@@ -94,6 +96,7 @@ mod r3v_voxelizer {
         ) -> Self {
             Self(crate::SingleThreaded::new(crate::VoxelizerParams {
                 resolution,
+                intensity_multiplier,
                 hit_multiplier,
                 target_multiplier,
                 destroy_threshold,
@@ -119,6 +122,7 @@ mod r3v_voxelizer {
         #[expect(clippy::too_many_arguments)]
         fn new(
             resolution: f32,
+            intensity_multiplier: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
@@ -130,6 +134,7 @@ mod r3v_voxelizer {
             match crate::MultiThreaded::new(
                 crate::VoxelizerParams {
                     resolution,
+                    intensity_multiplier,
                     hit_multiplier,
                     target_multiplier,
                     destroy_threshold,
@@ -160,6 +165,7 @@ mod r3v_voxelizer {
         #[expect(clippy::too_many_arguments)]
         fn new(
             resolution: f32,
+            intensity_multiplier: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
@@ -171,6 +177,7 @@ mod r3v_voxelizer {
             match pollster::block_on(crate::WgpuAccelerated::new(
                 crate::VoxelizerParams {
                     resolution,
+                    intensity_multiplier,
                     hit_multiplier,
                     target_multiplier,
                     destroy_threshold,

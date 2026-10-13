@@ -112,10 +112,10 @@ def point_i_setters():
 
 
 def constructors_reject_out_of_range(impl):
-    good = (1.0, 1, 1, 0, 1, U32_MAX, False)
+    good = (1.0, 1.0, 1, 1, 0, 1, U32_MAX, False)
     extra = () if impl.extra is None else (impl.extra[1],)
     cls = getattr(rv, impl.cls)
-    for k in range(1, 6):
+    for k in range(2, 7):
         for bad in (-1, U32_MAX + 1):
             with raises(OverflowError):
                 cls(*good[:k], bad, *good[k + 1:], *extra)
@@ -131,14 +131,16 @@ def constructors_accept_u32_max(impl):
 def constructors_accept_keywords(impl):
     # Out of order, so a swapped name shows up as swapped multipliers.
     kwargs = dict(compress=False, max_value=10, construct_threshold=1, destroy_threshold=0,
-                  target_multiplier=3, hit_multiplier=2, resolution=1.0)
+                  target_multiplier=3, hit_multiplier=2, intensity_multiplier=1.5,
+                  resolution=1.0)
     if impl.extra is not None:
         kwargs[impl.extra[0]] = impl.extra[1]
     v = getattr(rv, impl.cls)(**kwargs)
-    # Same as both_multipliers: seeds (0,0,0) with 4 * 3 = 12, capped at 10.
+    # Like both_multipliers: seeds (0,0,0) with (4 * 1.5) * 3 = 18, capped at 10.
     seed(v, 1.0, 0, 0, 0, 4.0)
+    # 2 * 1.5 = 3
     expect_voxels(add_point(v, sensor(), pf(3.5, 0.5, 0.5, 2.0)),
-                  pi(0, 0, 0, 10 - 2 * 2), pi(3, 0, 0, 2 * 3))
+                  pi(0, 0, 0, 10 - 3 * 2), pi(3, 0, 0, 3 * 3))
 
 
 def add_points_result_types(impl):
@@ -661,6 +663,20 @@ def max_value_caps_target(impl):
     expect_no_voxels(from_above(v, 3, 0, 0, 3.0))
 
 
+# ------------------------------------------------ intensity multiplier
+
+
+def intensity_multiplier_scales_hit_and_target(impl):
+    v = make(impl, 1.0, 2, 3, 0, 1, False, intensity_multiplier=2.5)
+    # Seeds (0,0,0) with (4 * 2.5) * 3 = 30.
+    seed(v, 1.0, 0, 0, 0, 4.0)
+    # int(3 * 2.5) = 7, times 2 subtracted and times 3 added.
+    expect_voxels(add_point(v, sensor(), pf(3.5, 0.5, 0.5, 3.0)),
+                  pi(0, 0, 0, 30 - 7 * 2), pi(3, 0, 0, 7 * 3))
+    # Scaled before truncation: int(0.5 * 2.5) = 1.
+    expect_voxels(from_above(v, 5, 0, 0, 0.5), pi(5, 0, 0, 1 * 3))
+
+
 # ------------------------------------------------------------ scenario
 
 
@@ -703,7 +719,7 @@ def single_and_wgpu_agree():
 
 def wgpu_rejects_zero_buckets():
     with raises(RuntimeError):
-        rv.WgpuAccelerated(1.0, 1, 1, 0, 1, U32_MAX, False, 0)
+        rv.WgpuAccelerated(1.0, 1.0, 1, 1, 0, 1, U32_MAX, False, 0)
 
 
 def wgpu_memory_size_grows():
@@ -808,6 +824,7 @@ TEST_CASES = [
     per_impl(compress_block_coords_far),
     per_impl(compress_mask_accumulates_across_calls),
     per_impl(max_value_caps_target),
+    per_impl(intensity_multiplier_scales_hit_and_target),
     per_impl(scenario_repeatable),
     once(single_and_multi_agree, "single_threaded", "multi_threaded"),
     once(multi_thread_count_zero, "multi_threaded"),

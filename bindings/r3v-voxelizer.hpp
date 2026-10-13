@@ -31,6 +31,7 @@ struct PointF {
 extern "C" {
 
 void *create_single_threaded_voxelizer(float _resolution,
+                                       float _intensity_multiplier,
                                        uint32_t _hit_multiplier,
                                        uint32_t _target_multiplier,
                                        uint32_t _destroy_threshold,
@@ -39,6 +40,7 @@ void *create_single_threaded_voxelizer(float _resolution,
                                        bool _compress);
 
 void *create_multi_threaded_voxelizer(float _resolution,
+                                      float _intensity_multiplier,
                                       uint32_t _hit_multiplier,
                                       uint32_t _target_multiplier,
                                       uint32_t _destroy_threshold,
@@ -51,6 +53,7 @@ void *create_multi_threaded_voxelizer(float _resolution,
 /// shaders, `bucket_count` is 0 or the hashmap does not fit the adapter's
 /// limits.
 void *create_wgpu_voxelizer(float _resolution,
+                            float _intensity_multiplier,
                             uint32_t _hit_multiplier,
                             uint32_t _target_multiplier,
                             uint32_t _destroy_threshold,

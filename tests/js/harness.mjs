@@ -206,11 +206,12 @@ export function sensor() {
 }
 
 /** Resolves to a new voxelizer of the given type, without a cap on voxel
- * values unless maxValue is given. */
+ * values unless maxValue is given and without scaling of intensities unless
+ * intensityMultiplier is given. */
 export async function make(impl, resolution, hitMultiplier, targetMultiplier, destroyThreshold,
-    constructThreshold, compress, maxValue = 0xFFFFFFFF) {
-    const args = [resolution, hitMultiplier, targetMultiplier, destroyThreshold,
-        constructThreshold, maxValue, compress];
+    constructThreshold, compress, maxValue = 0xFFFFFFFF, intensityMultiplier = 1.0) {
+    const args = [resolution, intensityMultiplier, hitMultiplier, targetMultiplier,
+        destroyThreshold, constructThreshold, maxValue, compress];
     if (impl.cls === "WgpuAccelerated") {
         return await rv.WgpuAccelerated.create(...args, WGPU_TEST_BUCKETS);
     }

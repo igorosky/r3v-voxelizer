@@ -1,6 +1,6 @@
 ## Parameters
 
-Every voxelizer takes `resolution`, `hit_multiplier`, `target_multiplier`, `destroy_threshold`, `construct_threshold`, `max_value` and `compress`, in this order (in Rust as a `VoxelizerParams` struct). `max_value` caps voxel values: a voxel seen many times saturates at it instead of growing without bound, so as many hits as `max_value` (divided by `hit_multiplier`) always clear it again. Pass `4294967295` (`u32::MAX`) for no cap. With `compress` a `max_value` below `construct_threshold` means no voxel ever gets constructed.
+Every voxelizer takes `resolution`, `intensity_multiplier`, `hit_multiplier`, `target_multiplier`, `destroy_threshold`, `construct_threshold`, `max_value` and `compress`, in this order (in Rust as a `VoxelizerParams` struct). `intensity_multiplier` scales the intensity of every point before it is truncated to an integer, so a point of intensity `i` adds `trunc(i * intensity_multiplier) * target_multiplier` to the voxel it ends in and subtracts `trunc(i * intensity_multiplier) * hit_multiplier` from every voxel its ray passes through (negative products count as 0). Pass `1.0` to leave intensities as they are. `max_value` caps voxel values: a voxel seen many times saturates at it instead of growing without bound, so as many hits as `max_value` (divided by `hit_multiplier`) always clear it again. Pass `4294967295` (`u32::MAX`) for no cap. With `compress` a `max_value` below `construct_threshold` means no voxel ever gets constructed.
 
 ## C/C++
 
@@ -46,8 +46,8 @@ Multi-threaded voxelizer is not supported in the JavaScript build.
 
 With `--features=js,wgpu` the module also has `WgpuAccelerated`, the GPU voxelizer running on WebGPU. Talking to the GPU is asynchronous on the web, so it has no constructor:
 ```js
-const voxelizer = await WgpuAccelerated.create(resolution, hitMultiplier, targetMultiplier,
-    destroyThreshold, constructThreshold, maxValue, compress, bucketCount);
+const voxelizer = await WgpuAccelerated.create(resolution, intensityMultiplier, hitMultiplier,
+    targetMultiplier, destroyThreshold, constructThreshold, maxValue, compress, bucketCount);
 const update = await voxelizer.add_points(sensor, points);
 ```
 `create` rejects when there is no WebGPU adapter capable of running compute shaders, `bucketCount` is 0 or the hashmap does not fit the adapter's limits (see C/C++ above for `bucketCount`, `WgpuAccelerated.memory_size(bucketCount)` gives the GPU memory it takes). Await each `add_points` call before starting the next one: a call made while another one is running rejects.

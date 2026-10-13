@@ -19,7 +19,7 @@ const ENTRY_LIST_HEADER_BYTES: u64 = 4;
 /// `Output` header: len + error, padded to the alignment of `vec4i`
 const OUTPUT_HEADER_BYTES: u64 = 16;
 /// `Params`
-const PARAMS_BYTES: u64 = 12 * 4;
+const PARAMS_BYTES: u64 = 16 * 4;
 /// Input (`vec4u`) and output (`vec4i`) element
 const POINT_BYTES: u64 = 16;
 /// Capacity (in points) the input and output buffers start with
@@ -84,6 +84,7 @@ pub struct WgpuAccelerated {
     max_binding_size: u64,
     max_workgroups: u32,
     resolution: f32,
+    intensity_multiplier: f32,
     hit_multiplier: u32,
     target_multiplier: u32,
     destroy_threshold: u32,
@@ -205,6 +206,7 @@ impl WgpuAccelerated {
     pub async fn new(params: VoxelizerParams, bucket_count: u32) -> Option<Self> {
         let VoxelizerParams {
             resolution,
+            intensity_multiplier,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -373,6 +375,7 @@ impl WgpuAccelerated {
             buckets,
             voxels,
             resolution,
+            intensity_multiplier,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -480,6 +483,10 @@ impl WgpuAccelerated {
             first,
             u32::from(self.compress),
             self.max_value,
+            self.intensity_multiplier.to_bits(),
+            0,
+            0,
+            0,
         ];
         self.queue
             .write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
@@ -589,7 +596,7 @@ mod test {
             .expect("a GPU adapter with compute shaders is required")
     }
 
-    /// Without a cap on voxel values.
+    /// Without a cap on voxel values or scaling of intensities.
     fn new(
         resolution: f32,
         hit_multiplier: u32,
@@ -602,6 +609,7 @@ mod test {
         with_buckets(
             VoxelizerParams {
                 resolution,
+                intensity_multiplier: 1.0,
                 hit_multiplier,
                 target_multiplier,
                 destroy_threshold,
@@ -781,6 +789,7 @@ mod test {
         let v = with_buckets(
             VoxelizerParams {
                 resolution: 0.5,
+                intensity_multiplier: 0.25,
                 hit_multiplier: 2,
                 target_multiplier: 3,
                 destroy_threshold: 4,
@@ -791,6 +800,7 @@ mod test {
             16,
         );
         assert_eq!(v.resolution, 0.5);
+        assert_eq!(v.intensity_multiplier, 0.25);
         assert_eq!(v.hit_multiplier, 2);
         assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);

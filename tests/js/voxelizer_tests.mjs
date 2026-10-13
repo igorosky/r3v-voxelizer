@@ -715,6 +715,19 @@ async function max_value_caps_target(impl) {
     await expectNoVoxels(fromAbove(v, 3, 0, 0, 3.0));
 }
 
+// ------------------------------------------------ intensity multiplier
+
+async function intensity_multiplier_scales_hit_and_target(impl) {
+    const v = await make(impl, 1.0, 2, 3, 0, 1, false, U32_MAX, 2.5);
+    // Seeds (0,0,0) with (4 * 2.5) * 3 = 30.
+    await seed(v, 1.0, 0, 0, 0, 4.0);
+    // Math.trunc(3 * 2.5) = 7, times 2 subtracted and times 3 added.
+    await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 3.0)),
+        pi(0, 0, 0, 30 - 7 * 2), pi(3, 0, 0, 7 * 3));
+    // Scaled before truncation: Math.trunc(0.5 * 2.5) = 1.
+    await expectVoxels(fromAbove(v, 5, 0, 0, 0.5), pi(5, 0, 0, 1 * 3));
+}
+
 // ------------------------------------------------------------ scenario
 
 async function scenario_repeatable(impl) {
@@ -742,7 +755,8 @@ async function single_and_wgpu_agree() {
 }
 
 async function wgpu_create_is_async() {
-    const created = rv.WgpuAccelerated.create(1.0, 1, 1, 0, 1, U32_MAX, false, WGPU_TEST_BUCKETS);
+    const created = rv.WgpuAccelerated.create(1.0, 1.0, 1, 1, 0, 1, U32_MAX, false,
+        WGPU_TEST_BUCKETS);
     check(created instanceof Promise, "WgpuAccelerated.create did not return a Promise");
     const v = await created;
     check(v instanceof rv.WgpuAccelerated, `created a ${v?.constructor?.name}`);
@@ -750,7 +764,7 @@ async function wgpu_create_is_async() {
 }
 
 async function wgpu_rejects_zero_buckets() {
-    await throwsError(() => rv.WgpuAccelerated.create(1.0, 1, 1, 0, 1, U32_MAX, false, 0),
+    await throwsError(() => rv.WgpuAccelerated.create(1.0, 1.0, 1, 1, 0, 1, U32_MAX, false, 0),
         "WgpuAccelerated.create with 0 buckets");
 }
 
@@ -866,6 +880,7 @@ const TEST_CASES = [
     perImpl(compress_block_coords_far),
     perImpl(compress_mask_accumulates_across_calls),
     perImpl(max_value_caps_target),
+    perImpl(intensity_multiplier_scales_hit_and_target),
     perImpl(scenario_repeatable),
     once(single_and_wgpu_agree, "single_threaded", "wgpu"),
     once(wgpu_create_is_async, "wgpu"),

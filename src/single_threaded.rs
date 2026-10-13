@@ -23,6 +23,7 @@ pub struct SingleThreaded {
     // Pages a voxel of which got zeroed during the current call
     maybe_empty: HashSet<ThreeDim>,
     resolution: f32,
+    intensity_multiplier: f32,
     hit_multiplier: u32,
     target_multiplier: u32,
     destroy_threshold: u32,
@@ -36,6 +37,7 @@ impl SingleThreaded {
     pub fn new(params: VoxelizerParams) -> Self {
         let VoxelizerParams {
             resolution,
+            intensity_multiplier,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -49,6 +51,7 @@ impl SingleThreaded {
             result: HashMap::new(),
             maybe_empty: HashSet::new(),
             resolution,
+            intensity_multiplier,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -72,6 +75,7 @@ impl Voxelizer for SingleThreaded {
             .iter()
             .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
         let resolution = self.resolution;
+        let intensity_multiplier = self.intensity_multiplier;
         points
             .iter()
             .map(move |v| v / resolution)
@@ -79,7 +83,7 @@ impl Voxelizer for SingleThreaded {
                 x: v.x.floor() as i32,
                 y: v.y.floor() as i32,
                 z: v.z.floor() as i32,
-                i: v.i as u32,
+                i: (v.i * intensity_multiplier) as u32,
             })
             .for_each(|point| self.add_voxel(&point));
         let mut result = Vec::new();
@@ -281,7 +285,7 @@ impl SingleThreaded {
             x: point.x.floor() as i32,
             y: point.y.floor() as i32,
             z: point.z.floor() as i32,
-            i: point.i as u32 * self.hit_multiplier,
+            i: (point.i * self.intensity_multiplier) as u32 * self.hit_multiplier,
         };
         let dir_x = (target_point.x - sensor_pos.x).signum();
         let dir_y = (target_point.y - sensor_pos.y).signum();
@@ -459,6 +463,7 @@ mod test {
     fn new_stores_parameters() {
         let v = SingleThreaded::new(VoxelizerParams {
             resolution: 0.5,
+            intensity_multiplier: 0.25,
             hit_multiplier: 2,
             target_multiplier: 3,
             destroy_threshold: 4,
@@ -467,6 +472,7 @@ mod test {
             compress: false,
         });
         assert_eq!(v.resolution, 0.5);
+        assert_eq!(v.intensity_multiplier, 0.25);
         assert_eq!(v.hit_multiplier, 2);
         assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);

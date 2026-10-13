@@ -531,6 +531,20 @@ static void max_value_caps_target(const Impl *impl) {
     drop_voxelizer(v);
 }
 
+/* --------------------------------------------- intensity multiplier */
+
+static void intensity_multiplier_scales_hit_and_target(const Impl *impl) {
+    void *v = make_full(impl, 1.0f, 2.5f, 2, 3, 0, 1, UINT32_MAX, false);
+    /* Seeds (0,0,0) with (4 * 2.5) * 3 = 30. */
+    seed(v, 1.0f, 0, 0, 0, 4.0f);
+    /* (3 * 2.5) as u32 = 7, times 2 subtracted and times 3 added. */
+    EXPECT_VOXELS(add_point(v, SENSOR, pf(3.5f, 0.5f, 0.5f, 3.0f)), pi(0, 0, 0, 30 - 7 * 2),
+                  pi(3, 0, 0, 7 * 3));
+    /* Scaled before truncation: (0.5 * 2.5) as u32 = 1. */
+    EXPECT_VOXELS(from_above(v, 5, 0, 0, 0.5f), pi(5, 0, 0, 1 * 3));
+    drop_voxelizer(v);
+}
+
 /* --------------------------------------------------------- scenario */
 
 static void scenario_repeatable(const Impl *impl) {
@@ -625,7 +639,7 @@ static void single_and_wgpu_agree(const Impl *unused) {
 
 static void wgpu_zero_buckets_null(const Impl *unused) {
     (void)unused;
-    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, UINT32_MAX, false, 0) == NULL);
+    CHECK(create_wgpu_voxelizer(1.0f, 1.0f, 1, 1, 0, 1, UINT32_MAX, false, 0) == NULL);
 }
 
 static void wgpu_memory_size_grows(const Impl *unused) {
@@ -637,7 +651,8 @@ static void wgpu_memory_size_grows(const Impl *unused) {
 #else
 static void wgpu_null_without_feature(const Impl *unused) {
     (void)unused;
-    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, UINT32_MAX, false, WGPU_TEST_BUCKETS) == NULL);
+    CHECK(create_wgpu_voxelizer(1.0f, 1.0f, 1, 1, 0, 1, UINT32_MAX, false, WGPU_TEST_BUCKETS) ==
+          NULL);
     CHECK(wgpu_memory_size(WGPU_TEST_BUCKETS) == 0);
 }
 #endif
@@ -730,6 +745,7 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(compress_block_coords_far),
     PER_IMPL(compress_mask_accumulates_across_calls),
     PER_IMPL(max_value_caps_target),
+    PER_IMPL(intensity_multiplier_scales_hit_and_target),
     PER_IMPL(scenario_repeatable),
     PER_IMPL(null_points_zero_count),
     PER_IMPL(null_points_nonzero_count),

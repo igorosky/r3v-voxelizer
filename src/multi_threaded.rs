@@ -27,6 +27,7 @@ pub struct MultiThreaded {
     // Pages a voxel of which got zeroed during the current call
     maybe_empty: DashSet<ThreeDim>,
     resolution: f32,
+    intensity_multiplier: f32,
     hit_multiplier: u32,
     target_multiplier: u32,
     destroy_threshold: u32,
@@ -41,6 +42,7 @@ impl MultiThreaded {
     pub fn new(params: VoxelizerParams, thread_count: usize) -> Result<Self, ThreadPoolBuildError> {
         let VoxelizerParams {
             resolution,
+            intensity_multiplier,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -54,6 +56,7 @@ impl MultiThreaded {
             result: DashMap::new(),
             maybe_empty: DashSet::new(),
             resolution,
+            intensity_multiplier,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -79,6 +82,7 @@ impl Voxelizer for MultiThreaded {
                 .par_iter()
                 .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
             let resolution = self.resolution;
+            let intensity_multiplier = self.intensity_multiplier;
             points
                 .par_iter()
                 .map(move |v| v / resolution)
@@ -86,7 +90,7 @@ impl Voxelizer for MultiThreaded {
                     x: v.x.floor() as i32,
                     y: v.y.floor() as i32,
                     z: v.z.floor() as i32,
-                    i: v.i as u32,
+                    i: (v.i * intensity_multiplier) as u32,
                 })
                 .for_each(|point| self.add_voxel(&point));
         });
@@ -291,7 +295,7 @@ impl MultiThreaded {
             x: point.x.floor() as i32,
             y: point.y.floor() as i32,
             z: point.z.floor() as i32,
-            i: point.i as u32 * self.hit_multiplier,
+            i: (point.i * self.intensity_multiplier) as u32 * self.hit_multiplier,
         };
         let dir_x = (target_point.x - sensor_pos.x).signum();
         let dir_y = (target_point.y - sensor_pos.y).signum();
@@ -427,7 +431,7 @@ mod test {
     /// Thread count used by the shared suite.
     const THREADS: usize = 4;
 
-    /// Without a cap on voxel values.
+    /// Without a cap on voxel values or scaling of intensities.
     fn new(
         resolution: f32,
         hit_multiplier: u32,
@@ -440,6 +444,7 @@ mod test {
         MultiThreaded::new(
             VoxelizerParams {
                 resolution,
+                intensity_multiplier: 1.0,
                 hit_multiplier,
                 target_multiplier,
                 destroy_threshold,
@@ -501,6 +506,7 @@ mod test {
     fn new_stores_parameters() {
         let params = VoxelizerParams {
             resolution: 0.5,
+            intensity_multiplier: 0.25,
             hit_multiplier: 2,
             target_multiplier: 3,
             destroy_threshold: 4,
@@ -510,6 +516,7 @@ mod test {
         };
         let v = MultiThreaded::new(params, 3).expect("thread pool must build");
         assert_eq!(v.resolution, 0.5);
+        assert_eq!(v.intensity_multiplier, 0.25);
         assert_eq!(v.hit_multiplier, 2);
         assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);

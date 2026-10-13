@@ -27,6 +27,10 @@ pub trait Voxelizer {
 pub struct VoxelizerParams {
     /// Size of a voxel, point coordinates are divided by it.
     pub resolution: f32,
+    /// Scales the intensity of every point before it is truncated to an
+    /// integer and multiplied by `hit_multiplier` or `target_multiplier`.
+    /// `1.0` leaves intensities as they are.
+    pub intensity_multiplier: f32,
     /// Scales the intensity subtracted from voxels a ray passes through.
     pub hit_multiplier: u32,
     /// Scales the intensity added to the voxel a ray ends in.

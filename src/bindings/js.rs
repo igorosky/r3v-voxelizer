@@ -63,8 +63,10 @@ mod st {
     #[wasm_bindgen]
     impl SingleThreaded {
         #[wasm_bindgen(constructor)]
+        #[expect(clippy::too_many_arguments)]
         pub fn new(
             resolution: f32,
+            intensity_multiplier: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
@@ -74,6 +76,7 @@ mod st {
         ) -> Self {
             Self(crate::SingleThreaded::new(crate::VoxelizerParams {
                 resolution,
+                intensity_multiplier,
                 hit_multiplier,
                 target_multiplier,
                 destroy_threshold,
@@ -121,6 +124,7 @@ mod gpu {
         #[expect(clippy::too_many_arguments)]
         pub async fn create(
             resolution: f32,
+            intensity_multiplier: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
@@ -132,6 +136,7 @@ mod gpu {
             crate::WgpuAccelerated::new(
                 crate::VoxelizerParams {
                     resolution,
+                    intensity_multiplier,
                     hit_multiplier,
                     target_multiplier,
                     destroy_threshold,

@@ -16,8 +16,10 @@ pub struct VoxelsUpdate {
     feature = "multi_threaded",
     feature = "wgpu"
 ))]
+#[expect(clippy::too_many_arguments)]
 fn params(
     resolution: f32,
+    intensity_multiplier: f32,
     hit_multiplier: u32,
     target_multiplier: u32,
     destroy_threshold: u32,
@@ -27,6 +29,7 @@ fn params(
 ) -> crate::VoxelizerParams {
     crate::VoxelizerParams {
         resolution,
+        intensity_multiplier,
         hit_multiplier,
         target_multiplier,
         destroy_threshold,
@@ -39,6 +42,7 @@ fn params(
 #[unsafe(no_mangle)]
 pub extern "C" fn create_single_threaded_voxelizer(
     _resolution: f32,
+    _intensity_multiplier: f32,
     _hit_multiplier: u32,
     _target_multiplier: u32,
     _destroy_threshold: u32,
@@ -52,6 +56,7 @@ pub extern "C" fn create_single_threaded_voxelizer(
     {
         let voxelizer: Box<dyn Voxelizer> = Box::new(crate::SingleThreaded::new(params(
             _resolution,
+            _intensity_multiplier,
             _hit_multiplier,
             _target_multiplier,
             _destroy_threshold,
@@ -66,6 +71,7 @@ pub extern "C" fn create_single_threaded_voxelizer(
 #[unsafe(no_mangle)]
 pub extern "C" fn create_multi_threaded_voxelizer(
     _resolution: f32,
+    _intensity_multiplier: f32,
     _hit_multiplier: u32,
     _target_multiplier: u32,
     _destroy_threshold: u32,
@@ -82,6 +88,7 @@ pub extern "C" fn create_multi_threaded_voxelizer(
             match crate::MultiThreaded::new(
                 params(
                     _resolution,
+                    _intensity_multiplier,
                     _hit_multiplier,
                     _target_multiplier,
                     _destroy_threshold,
@@ -105,6 +112,7 @@ pub extern "C" fn create_multi_threaded_voxelizer(
 #[unsafe(no_mangle)]
 pub extern "C" fn create_wgpu_voxelizer(
     _resolution: f32,
+    _intensity_multiplier: f32,
     _hit_multiplier: u32,
     _target_multiplier: u32,
     _destroy_threshold: u32,
@@ -121,6 +129,7 @@ pub extern "C" fn create_wgpu_voxelizer(
             match pollster::block_on(crate::WgpuAccelerated::new(
                 params(
                     _resolution,
+                    _intensity_multiplier,
                     _hit_multiplier,
                     _target_multiplier,
                     _destroy_threshold,

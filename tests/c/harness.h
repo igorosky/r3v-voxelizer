@@ -87,6 +87,10 @@ PointF pf(float x, float y, float z, float i);
 PointI pi(int32_t x, int32_t y, int32_t z, uint32_t i);
 
 /* Creates a voxelizer of the given type. Fails the test on NULL. */
+void *make_full(const Impl *impl, float resolution, float intensity_multiplier,
+                uint32_t hit_multiplier, uint32_t target_multiplier, uint32_t destroy_threshold,
+                uint32_t construct_threshold, uint32_t max_value, bool compress);
+/* make_full without scaling of intensities. */
 void *make_capped(const Impl *impl, float resolution, uint32_t hit_multiplier,
                   uint32_t target_multiplier, uint32_t destroy_threshold,
                   uint32_t construct_threshold, uint32_t max_value, bool compress);

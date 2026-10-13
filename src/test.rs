@@ -33,6 +33,7 @@ pub(crate) const SEED: u32 = 10;
 /// compression.
 pub(crate) const PLAIN: VoxelizerParams = VoxelizerParams {
     resolution: 1.0,
+    intensity_multiplier: 1.0,
     hit_multiplier: 1,
     target_multiplier: 1,
     destroy_threshold: 0,
@@ -49,7 +50,8 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
     const PAGE_SIZE: u32;
     /// `new` without anything implementation specific.
     fn with_params(params: VoxelizerParams) -> Self;
-    /// [`TestVoxelizer::with_params`] without a cap on voxel values.
+    /// [`TestVoxelizer::with_params`] without a cap on voxel values or
+    /// scaling of intensities.
     fn make(
         resolution: f32,
         hit_multiplier: u32,
@@ -60,6 +62,7 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
     ) -> Self {
         Self::with_params(VoxelizerParams {
             resolution,
+            intensity_multiplier: 1.0,
             hit_multiplier,
             target_multiplier,
             destroy_threshold,
@@ -270,8 +273,9 @@ pub(crate) fn along_x<T: TestVoxelizer>(
 /// `destroy = construct - 1`, so a voxel above the destroy threshold has
 /// always been constructed and the destroy path never meets a missing
 /// compressed page. The caps are below the intensities of call 1, whose
-/// targets call 2 hits.
-pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 4] = [
+/// targets call 2 hits. The intensities are integers, so scaling them by
+/// 1.5 truncates the odd ones.
+pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 5] = [
     PLAIN,
     VoxelizerParams {
         destroy_threshold: 2,
@@ -288,6 +292,10 @@ pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 4] = [
         construct_threshold: 3,
         max_value: 4,
         compress: true,
+        ..PLAIN
+    },
+    VoxelizerParams {
+        intensity_multiplier: 1.5,
         ..PLAIN
     },
 ];
@@ -451,6 +459,10 @@ macro_rules! shared_tests {
             max_value_voxel_not_permanent,
             max_value_saturates_instead_of_overflowing,
             max_value_with_compress,
+            intensity_multiplier_scales_target,
+            intensity_multiplier_scales_hit,
+            intensity_multiplier_truncates_after_scaling,
+            intensity_multiplier_zero_or_negative,
             scenario_repeatable,
         );
     };
@@ -1487,6 +1499,64 @@ pub(crate) fn max_value_with_compress<T: TestVoxelizer>() {
     assert_eq!(result, vec![block(3, 0, 0, 0)]);
     assert_eq!(get_voxel(&v, 3, 0, 0), Some(2));
     assert!(compressed_bits(&v).is_empty());
+}
+
+// ---------------------------------------------------- intensity multiplier
+
+/// [`PLAIN`] with intensities scaled by `intensity_multiplier` and the
+/// given hit and target multipliers.
+fn scaled<T: TestVoxelizer>(
+    intensity_multiplier: f32,
+    hit_multiplier: u32,
+    target_multiplier: u32,
+) -> T {
+    T::with_params(VoxelizerParams {
+        intensity_multiplier,
+        hit_multiplier,
+        target_multiplier,
+        ..PLAIN
+    })
+}
+
+pub(crate) fn intensity_multiplier_scales_target<T: TestVoxelizer>() {
+    // (3 * 2.5) as u32 * 2 = 7 * 2
+    let mut v = scaled::<T>(2.5, 1, 2);
+    assert_eq!(from_above(&mut v, (3, 0, 0), 3.0), vec![pi(3, 0, 0, 14)]);
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(14));
+}
+
+pub(crate) fn intensity_multiplier_scales_hit<T: TestVoxelizer>() {
+    // (3 * 2.5) as u32 = 7, times 2 subtracted and times 1 added.
+    let mut v = scaled::<T>(2.5, 2, 1);
+    v.set_voxel(0, 0, 0, 20);
+    let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 3.0)]);
+    assert_eq!(sorted(result), vec![pi(0, 0, 0, 20 - 14), pi(3, 0, 0, 7)]);
+    assert_eq!(get_voxel(&v, 0, 0, 0), Some(6));
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(7));
+}
+
+pub(crate) fn intensity_multiplier_truncates_after_scaling<T: TestVoxelizer>() {
+    // (0.5 * 3) as u32 = 1, truncating first would give 0 * 3.
+    let mut v = scaled::<T>(3.0, 1, 2);
+    v.set_voxel(0, 0, 0, SEED);
+    let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 0.5)]);
+    assert_eq!(sorted(result), vec![pi(0, 0, 0, SEED - 1), pi(3, 0, 0, 2)]);
+}
+
+pub(crate) fn intensity_multiplier_zero_or_negative<T: TestVoxelizer>() {
+    // Scaled intensities below zero saturate at it.
+    for intensity_multiplier in [0.0, -1.0] {
+        let mut v = scaled::<T>(intensity_multiplier, 1, 1);
+        v.set_voxel(0, 0, 0, SEED);
+        let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 5.0)]);
+        assert!(
+            result.is_empty(),
+            "intensity_multiplier = {intensity_multiplier}"
+        );
+        assert_eq!(get_voxel(&v, 0, 0, 0), Some(SEED));
+        assert_eq!(get_voxel(&v, 3, 0, 0), Some(0));
+        assert_eq!(v.pending_results(), 0);
+    }
 }
 
 // ---------------------------------------------------------------- scenario

@@ -36,6 +36,12 @@ struct Params {
     compress: u32,
     // Voxel values saturate at it
     max_value: u32,
+    // Scales point intensities before they are truncated
+    intensity_multiplier: f32,
+    // Keeps the size a multiple of 16 bytes
+    _padding0: u32,
+    _padding1: u32,
+    _padding2: u32,
 }
 
 // Every entry is listed at most once
@@ -337,7 +343,7 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
     // http://www.cse.yorku.ca/~amana/research/grid.pdf
     let input = bitcast<vec4f>(input_points[index]);
     let point = input.xyz / params.resolution;
-    let hit_value = u32(input.w) * params.hit_multiplier;
+    let hit_value = u32(input.w * params.intensity_multiplier) * params.hit_multiplier;
     let target_point = vec3i(floor(point));
     let sensor_pos_divided = vec3f(params.camera_x, params.camera_y, params.camera_z) / params.resolution;
     var sensor_pos = vec3i(floor(sensor_pos_divided));
@@ -456,7 +462,7 @@ fn add_point(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
     }
     let input = bitcast<vec4f>(input_points[index]);
     let pos = vec3i(floor(input.xyz / params.resolution));
-    let val = u32(input.w) * params.target_multiplier;
+    let val = u32(input.w * params.intensity_multiplier) * params.target_multiplier;
     add_val(pos, val);
 }
 
