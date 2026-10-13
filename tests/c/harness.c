@@ -6,9 +6,12 @@
 #include <string.h>
 
 const Impl IMPLS[] = {
-    {"single", false, 0},
-    {"multi_1", true, 1},
-    {"multi_4", true, 4},
+    {"single", IMPL_SINGLE, 0},
+    {"multi_1", IMPL_MULTI, 1},
+    {"multi_4", IMPL_MULTI, 4},
+#ifdef R3V_TEST_WGPU
+    {"wgpu", IMPL_WGPU, 0},
+#endif
 };
 const size_t IMPL_COUNT = ARRAY_LEN(IMPLS);
 
@@ -113,13 +116,25 @@ void *make(const Impl *impl, float resolution, uint32_t hit_multiplier,
            uint32_t target_multiplier, uint32_t destroy_threshold,
            uint32_t construct_threshold, bool compress)
 {
-    void *voxelizer =
-        impl->multi
-            ? create_multi_threaded_voxelizer(resolution, hit_multiplier, target_multiplier,
-                                              destroy_threshold, construct_threshold, compress,
-                                              impl->threads)
-            : create_single_threaded_voxelizer(resolution, hit_multiplier, target_multiplier,
-                                               destroy_threshold, construct_threshold, compress);
+    void *voxelizer = NULL;
+    switch (impl->kind)
+    {
+    case IMPL_SINGLE:
+        voxelizer = create_single_threaded_voxelizer(resolution, hit_multiplier, target_multiplier,
+                                                     destroy_threshold, construct_threshold,
+                                                     compress);
+        break;
+    case IMPL_MULTI:
+        voxelizer = create_multi_threaded_voxelizer(resolution, hit_multiplier, target_multiplier,
+                                                    destroy_threshold, construct_threshold,
+                                                    compress, impl->threads);
+        break;
+    case IMPL_WGPU:
+        voxelizer = create_wgpu_voxelizer(resolution, hit_multiplier, target_multiplier,
+                                          destroy_threshold, construct_threshold, compress,
+                                          WGPU_TEST_BUCKETS);
+        break;
+    }
     CHECK(voxelizer != NULL);
     return voxelizer;
 }

@@ -44,13 +44,12 @@ jobs:
           key: ${{ matrix.group }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      # Runners have no GPU: the wgpu tests run on lavapipe (Mesa's CPU
-      # Vulkan driver). Pinned to the noble release version: lavapipe from
-      # noble-updates (Mesa 25.2.8) segfaults inside the JIT compiled shader
-      # as soon as one dispatch has more than one point. Mesa 22.3 to 25.0
-      # and 26.2 pass.
+      # Runners have no GPU: the wgpu tests of every group (the binding
+      # suites run on the GPU too) use lavapipe (Mesa's CPU Vulkan driver).
+      # Pinned to the noble release version: lavapipe from noble-updates
+      # (Mesa 25.2.8) segfaults inside the JIT compiled shader as soon as one
+      # dispatch has more than one point. Mesa 22.3 to 25.0 and 26.2 pass.
       - name: Install lavapipe
-        if: matrix.group == 'core'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends --allow-downgrades \
@@ -63,6 +62,17 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+
+      # Node.js has no WebGPU: the JS wgpu tests take Dawn from the `webgpu`
+      # package (tests/js/package.json)
+      - uses: actions/setup-node@v5
+        if: matrix.group == 'js'
+        with:
+          node-version: 24
+
+      - name: Install the webgpu package
+        if: matrix.group == 'js'
+        run: npm ci --prefix tests/js
 
       - run: ./test.sh ${{ matrix.group }}
 

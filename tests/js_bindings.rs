@@ -8,6 +8,11 @@
 //!
 //! Needs `wasm-pack` (or `WASM_PACK`), the `wasm32-unknown-unknown` target
 //! (`rustup target add wasm32-unknown-unknown`) and `node` (or `NODE`).
+//!
+//! With the `wgpu` feature the tests also need WebGPU, which Node.js lacks:
+//! the `webgpu` package (Dawn) installed into `tests/js/node_modules` by
+//! `npm ci` in `tests/js`, and a Vulkan device (a software one such as
+//! lavapipe works).
 
 use std::{
     env,
@@ -29,8 +34,13 @@ const TEST_SCRIPT: &str = "tests/js/voxelizer_tests.mjs";
 /// enabled ones (comma separated, in `R3V_VOXELIZER_FEATURES`) and expect
 /// exactly the matching classes. `multi_threaded` is not supported in JS
 /// (build.rs refuses `js` together with it).
-const VOXELIZER_FEATURES: [(&str, bool); 1] =
-    [("single_threaded", cfg!(feature = "single_threaded"))];
+const VOXELIZER_FEATURES: [(&str, bool); 2] = [
+    ("single_threaded", cfg!(feature = "single_threaded")),
+    ("wgpu", cfg!(feature = "wgpu")),
+];
+
+/// Where the JS tests of the `wgpu` feature take WebGPU from.
+const WEBGPU_PACKAGE: &str = "tests/js/node_modules/webgpu";
 
 /// The generated JS package and the Node.js that runs the tests.
 struct JsTests {
@@ -44,6 +54,12 @@ impl JsTests {
     /// concurrent test runs do not overwrite each other's package.
     fn setup() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !cfg!(feature = "wgpu") || root.join(WEBGPU_PACKAGE).is_dir(),
+            "{WEBGPU_PACKAGE} not found; install it with `npm ci` in tests/js, e.g. in docker: \
+             docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v \"$PWD/tests/js:/w\" -w /w \
+             node:24 npm ci"
+        );
         let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
         let pkg_dir = tmp.join(format!("js-{}", process::id()));
         let features: Vec<&str> = ["js"].into_iter().chain(enabled_features()).collect();

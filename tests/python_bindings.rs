@@ -4,6 +4,9 @@
 //! name of the extension module, into a temporary directory and imported from
 //! there. Every Python test case runs in its own interpreter process, so a
 //! crash fails only that case.
+//!
+//! With the `wgpu` feature the tests also run on the GPU, which needs a
+//! Vulkan device (a software one such as lavapipe works).
 
 use std::{
     env::{self, consts},
@@ -27,9 +30,10 @@ const MODULE_SUFFIX: &str = if cfg!(windows) { ".pyd" } else { ".so" };
 /// Voxelizer features the module may be built with. The Python tests get the
 /// enabled ones (comma separated, in `R3V_VOXELIZER_FEATURES`) and expect
 /// exactly the matching classes.
-const VOXELIZER_FEATURES: [(&str, bool); 2] = [
+const VOXELIZER_FEATURES: [(&str, bool); 3] = [
     ("single_threaded", cfg!(feature = "single_threaded")),
     ("multi_threaded", cfg!(feature = "multi_threaded")),
+    ("wgpu", cfg!(feature = "wgpu")),
 ];
 
 /// The importable copy of the module and the interpreter that runs the tests.

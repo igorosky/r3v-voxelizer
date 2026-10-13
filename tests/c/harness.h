@@ -19,11 +19,25 @@
  * becomes observable. Hit voxels are seeded with this value. */
 #define SEED 10u
 
-/* One voxelizer type the per implementation tests run against. */
+/* Hashmap size of the wgpu voxelizers the tests create: 8192 pages, as in
+ * the wgpu unit tests (src/wgpu.rs). */
+#define WGPU_TEST_BUCKETS 4096u
+
+typedef enum ImplKind
+{
+    IMPL_SINGLE,
+    IMPL_MULTI,
+    IMPL_WGPU,
+} ImplKind;
+
+/* One voxelizer type the per implementation tests run against. The wgpu one
+ * is there when the tests are compiled with R3V_TEST_WGPU (the crate's wgpu
+ * feature). */
 typedef struct Impl
 {
     const char *name;
-    bool multi;
+    ImplKind kind;
+    /* Thread count of IMPL_MULTI. */
     uintptr_t threads;
 } Impl;
 

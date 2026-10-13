@@ -1,0 +1,9 @@
+{
+  "name": "r3v-voxelizer-js-tests",
+  "private": true,
+  "description": "WebGPU for Node.js, needed by the JS tests of the wgpu feature (tests/js_bindings.rs)",
+  "type": "module",
+  "devDependencies": {
+    "webgpu": "0.4.0"
+  }
+}

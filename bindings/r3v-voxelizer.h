@@ -40,6 +40,25 @@ void *create_multi_threaded_voxelizer(float _resolution,
                                       bool _compress,
                                       uintptr_t _thread_count);
 
+/**
+ * Returns NULL when there is no GPU adapter capable of running compute
+ * shaders, `bucket_count` is 0 or the hashmap does not fit the adapter's
+ * limits.
+ */
+void *create_wgpu_voxelizer(float _resolution,
+                            uint32_t _hit_multiplier,
+                            uint32_t _target_multiplier,
+                            uint32_t _destroy_threshold,
+                            uint32_t _construct_threshold,
+                            bool _compress,
+                            uint32_t _bucket_count);
+
+/**
+ * GPU memory taken by the hashmap of a wgpu voxelizer with `bucket_count`
+ * buckets, in bytes. 0 when built without wgpu.
+ */
+uint64_t wgpu_memory_size(uint32_t _bucket_count);
+
 struct VoxelsUpdate add_points(void *voxelizer,
                                struct PointF sensor_pos,
                                const struct PointF *points,

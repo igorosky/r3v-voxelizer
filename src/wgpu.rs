@@ -92,7 +92,18 @@ pub struct WgpuAccelerated {
 }
 
 impl Voxelizer for WgpuAccelerated {
+    /// Blocks until the GPU is done, see [`WgpuAccelerated::add_points_async`]
+    /// for targets that cannot block (the web).
     fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI> {
+        pollster::block_on(self.add_points_async(sensor_pos, points))
+    }
+}
+
+impl WgpuAccelerated {
+    /// Same as [`Voxelizer::add_points`], without blocking while the GPU
+    /// works. The only way to add points on the web, where waiting for the
+    /// GPU has to give control back to the browser.
+    pub async fn add_points_async(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI> {
         let camera = [sensor_pos.x, sensor_pos.y, sensor_pos.z];
         let input: Vec<[u32; 4]> = points
             .iter()
@@ -122,7 +133,7 @@ impl Voxelizer for WgpuAccelerated {
             }
         }
 
-        let altered = self.read_words(self.encoder(), &self.altered, 0, 1)[0];
+        let altered = self.read_words(self.encoder(), &self.altered, 0, 1).await[0];
         let per_entry = if self.compress {
             2
         } else {
@@ -144,19 +155,21 @@ impl Voxelizer for WgpuAccelerated {
                 self.dispatch(&mut encoder, Kernel::RemoveEmpty, altered);
                 self.dispatch(&mut encoder, Kernel::ReclaimRemoved, altered);
             }
-            let [len, error] = self.read_words(encoder, &self.output, 0, 2)[..] else {
+            let [len, error] = self.read_words(encoder, &self.output, 0, 2).await[..] else {
                 unreachable!("2 words are read");
             };
             if error != 0 {
                 panic!("It must have existed if it is destroyed");
             }
             if len != 0 {
-                let data = self.read_back(
-                    self.encoder(),
-                    &self.output,
-                    OUTPUT_HEADER_BYTES,
-                    u64::from(len) * POINT_BYTES,
-                );
+                let data = self
+                    .read_back(
+                        self.encoder(),
+                        &self.output,
+                        OUTPUT_HEADER_BYTES,
+                        u64::from(len) * POINT_BYTES,
+                    )
+                    .await;
                 result.extend(
                     bytemuck::pod_collect_to_vec::<u8, [u32; 4]>(&data)
                         .into_iter()
@@ -171,9 +184,7 @@ impl Voxelizer for WgpuAccelerated {
         }
         result
     }
-}
 
-impl WgpuAccelerated {
     /// GPU memory taken by the hashmap of `bucket_count` buckets, in bytes.
     pub fn memory_size(bucket_count: u32) -> u64 {
         let entry_count = u64::from(bucket_count) * BUCKET_SIZE;
@@ -496,7 +507,7 @@ impl WgpuAccelerated {
 
     /// Submits `encoder` and returns `size` bytes of `source` starting at
     /// `offset` once everything submitted so far has finished.
-    fn read_back(
+    async fn read_back(
         &self,
         mut encoder: wgpu::CommandEncoder,
         source: &wgpu::Buffer,
@@ -512,10 +523,18 @@ impl WgpuAccelerated {
         encoder.copy_buffer_to_buffer(source, offset, &staging, 0, size);
         self.queue.submit([encoder.finish()]);
         // A failed mapping is reported by `get_mapped_range`
-        staging.map_async(wgpu::MapMode::Read, .., |_| ());
+        let (mapped, on_mapped) = futures_channel::oneshot::channel();
+        staging.map_async(wgpu::MapMode::Read, .., move |_| {
+            let _ = mapped.send(());
+        });
+        // Native backends map (and call back) while polling, the web maps on
+        // its own and polling does nothing there
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("waiting for the GPU failed");
+        on_mapped
+            .await
+            .expect("the GPU dropped the mapping callback");
         let data = staging
             .get_mapped_range(..)
             .expect("mapping the GPU buffer failed")
@@ -524,14 +543,14 @@ impl WgpuAccelerated {
         data
     }
 
-    fn read_words(
+    async fn read_words(
         &self,
         encoder: wgpu::CommandEncoder,
         source: &wgpu::Buffer,
         offset: u64,
         count: u64,
     ) -> Vec<u32> {
-        bytemuck::pod_collect_to_vec(&self.read_back(encoder, source, offset, count * 4))
+        bytemuck::pod_collect_to_vec(&self.read_back(encoder, source, offset, count * 4).await)
     }
 }
 
@@ -604,19 +623,19 @@ mod test {
             self.queue.submit([encoder.finish()]);
         }
 
+        /// Whole `buffer`, read back as words.
+        fn words_of(&self, buffer: &wgpu::Buffer) -> Vec<u32> {
+            bytemuck::pod_collect_to_vec(&pollster::block_on(self.read_back(
+                self.encoder(),
+                buffer,
+                0,
+                buffer.size(),
+            )))
+        }
+
         fn entries(&self) -> Vec<Entry> {
-            let entries: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read_back(
-                self.encoder(),
-                &self.buckets,
-                0,
-                self.buckets.size(),
-            ));
-            let voxels: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read_back(
-                self.encoder(),
-                &self.voxels,
-                0,
-                self.voxels.size(),
-            ));
+            let entries = self.words_of(&self.buckets);
+            let voxels = self.words_of(&self.voxels);
             let entry_words = (ENTRY_BYTES / 4) as usize;
             let voxel_words = (VOXEL_BYTES / 4) as usize;
             let mut out = Vec::new();
@@ -644,12 +663,7 @@ mod test {
 
         /// First key word of every hashmap entry, set ones included.
         fn key_heads(&self) -> Vec<u32> {
-            let entries: Vec<u32> = bytemuck::pod_collect_to_vec(&self.read_back(
-                self.encoder(),
-                &self.buckets,
-                0,
-                self.buckets.size(),
-            ));
+            let entries = self.words_of(&self.buckets);
             let entry_words = (ENTRY_BYTES / 4) as usize;
             entries
                 .chunks_exact(entry_words)

@@ -12,9 +12,9 @@ import sys
 import r3v_voxelizer as rv
 
 from harness import (
-    CLASS_OF_FEATURE, FEATURES, SCENARIO_PARAMS, SEED, SINGLE, Impl, add_point, along_x, block, block_bit, check, check_ray,
-    check_update, compressed, coords, expect_no_voxels, expect_voxels, from_above, main, make,
-    pf, pi, plain, raises, scenario, seed, sensor,
+    CLASS_OF_FEATURE, FEATURES, SCENARIO_PARAMS, SEED, SINGLE, WGPU, WGPU_TEST_BUCKETS, add_point, along_x, block,
+    block_bit, check, check_ray, check_update, compressed, coords, expect_no_voxels, expect_voxels, from_above, main,
+    make, multi_threaded, pf, pi, plain, raises, scenario, seed, sensor,
 )
 
 U32_MAX = 2**32 - 1
@@ -117,9 +117,9 @@ def constructors_reject_out_of_range(impl):
         for bad in (-1, U32_MAX + 1):
             with raises(OverflowError):
                 make(impl, *good[:k], bad, *good[k + 1:])
-    if impl.multi:
+    if impl.extra is not None:
         with raises(OverflowError):
-            rv.MultiThreaded(*good, -1)
+            getattr(rv, impl.cls)(*good, -1)
 
 
 def constructors_accept_u32_max(impl):
@@ -130,10 +130,9 @@ def constructors_accept_keywords(impl):
     # Out of order, so a swapped name shows up as swapped multipliers.
     kwargs = dict(compress=False, construct_threshold=1, destroy_threshold=0,
                   target_multiplier=3, hit_multiplier=2, resolution=1.0)
-    if impl.multi:
-        v = rv.MultiThreaded(thread_count=impl.threads, **kwargs)
-    else:
-        v = rv.SingleThreaded(**kwargs)
+    if impl.extra is not None:
+        kwargs[impl.extra[0]] = impl.extra[1]
+    v = getattr(rv, impl.cls)(**kwargs)
     # Same as both_multipliers: seeds (0,0,0) with 4 * 3 = 12.
     seed(v, 1.0, 0, 0, 0, 4.0)
     expect_voxels(add_point(v, sensor(), pf(3.5, 0.5, 0.5, 2.0)),
@@ -212,7 +211,7 @@ def instances_are_independent(impl):
 
 
 def create(impl):
-    cls = rv.MultiThreaded if impl.multi else rv.SingleThreaded
+    cls = getattr(rv, impl.cls)
     for v in (plain(impl), compressed(impl), make(impl, 0.05, 2, 3, 4, 5, True)):
         check(type(v) is cls, f"created a {type(v).__name__}, expected {cls.__name__}")
 
@@ -670,14 +669,34 @@ def single_and_multi_agree():
         for call, update in enumerate(expected):
             check(len(update) > 0, f"compress = {compress}: call {call} changed nothing")
         for threads in (1, 2, 4, 8):
-            multi = Impl("multi", True, threads)
+            multi = multi_threaded("multi", threads)
             got = scenario(make(multi, 1.0, 1, 1, destroy, construct, compress))
             check(got == expected, f"compress = {compress}, threads = {threads}: differs")
 
 
 def multi_thread_count_zero():
     # 0 means the default thread count.
-    basic_1d(Impl("multi_0", True, 0))
+    basic_1d(multi_threaded("multi_0", 0))
+
+
+def single_and_wgpu_agree():
+    for destroy, construct, compress in SCENARIO_PARAMS:
+        expected = scenario(make(SINGLE, 1.0, 1, 1, destroy, construct, compress))
+        for call, update in enumerate(expected):
+            check(len(update) > 0, f"compress = {compress}: call {call} changed nothing")
+        got = scenario(make(WGPU, 1.0, 1, 1, destroy, construct, compress))
+        check(got == expected, f"compress = {compress}: differs")
+
+
+def wgpu_rejects_zero_buckets():
+    with raises(RuntimeError):
+        rv.WgpuAccelerated(1.0, 1, 1, 0, 1, False, 0)
+
+
+def wgpu_memory_size_grows():
+    sizes = [rv.WgpuAccelerated.memory_size(n) for n in (1, 2, WGPU_TEST_BUCKETS)]
+    check(all(type(size) is int for size in sizes), f"memory_size returned {sizes}, not ints")
+    check(0 < sizes[0] < sizes[1] < sizes[2], f"memory sizes {sizes} do not grow")
 
 
 def compress_helpers_self_check():
@@ -778,6 +797,9 @@ TEST_CASES = [
     per_impl(scenario_repeatable),
     once(single_and_multi_agree, "single_threaded", "multi_threaded"),
     once(multi_thread_count_zero, "multi_threaded"),
+    once(single_and_wgpu_agree, "single_threaded", "wgpu"),
+    once(wgpu_rejects_zero_buckets, "wgpu"),
+    once(wgpu_memory_size_grows, "wgpu"),
     once(compress_helpers_self_check),
 ]
 

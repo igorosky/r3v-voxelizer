@@ -13,9 +13,10 @@
 # feature would only repeat the same tests. Binding suites run once per
 # feature set that changes what the bindings export.
 #
-# Needs a Vulkan device for the wgpu tests (a software one such as lavapipe
-# works), python3 and a C compiler for the bindings tests, and wasm-pack, the
-# wasm32-unknown-unknown target and node for the JS tests.
+# Needs a Vulkan device for the wgpu tests of every group (a software one such
+# as lavapipe works), python3 and a C compiler for the bindings tests, and
+# wasm-pack, the wasm32-unknown-unknown target and node for the JS tests. The
+# JS wgpu tests also need the `webgpu` package: `npm ci` in tests/js.
 
 set -euo pipefail
 
@@ -76,15 +77,20 @@ group_c() {
         "c"
         "c,single_threaded"
         "c,multi_threaded"
+        "c,wgpu"
         "c,single_threaded,multi_threaded"
+        "c,single_threaded,multi_threaded,wgpu"
         "cpp"
+        "cpp,wgpu"
         "cpp,single_threaded,multi_threaded"
-        "c,cpp,single_threaded,multi_threaded"
+        "c,cpp,single_threaded,multi_threaded,wgpu"
     )
     for features in "${sets[@]}"; do
         clippy "$features"
     done
+    # The suite needs both CPU implementations, with and without the GPU one
     cargo_test "c,single_threaded,multi_threaded" --test c_bindings
+    cargo_test "c,single_threaded,multi_threaded,wgpu" --test c_bindings
 }
 
 group_python() {
@@ -93,7 +99,9 @@ group_python() {
         "python"
         "python,single_threaded"
         "python,multi_threaded"
+        "python,wgpu"
         "python,single_threaded,multi_threaded"
+        "python,single_threaded,multi_threaded,wgpu"
     )
     for features in "${sets[@]}"; do
         clippy "$features"
@@ -108,6 +116,8 @@ group_js() {
     local sets=(
         "js"
         "js,single_threaded"
+        "js,wgpu"
+        "js,single_threaded,wgpu"
     )
     for features in "${sets[@]}"; do
         clippy "$features"

@@ -3,6 +3,10 @@
 //! The C sources are compiled against `bindings/r3v-voxelizer.h` and the
 //! cdylib that cargo built for this test run. Every C test case runs in its
 //! own process, so a crash (e.g. a NULL dereference) fails only that case.
+//!
+//! With the `wgpu` feature the tests are compiled with `R3V_TEST_WGPU` and
+//! also run on the GPU, which needs a Vulkan device (a software one such as
+//! lavapipe works).
 
 use std::{
     env::{self, consts},
@@ -42,7 +46,11 @@ impl CTests {
         ));
         let lib_dir = lib_dir();
         let cc = env::var("CC").unwrap_or_else(|_| "cc".to_owned());
-        let output = Command::new(&cc)
+        let mut command = Command::new(&cc);
+        if cfg!(feature = "wgpu") {
+            command.arg("-DR3V_TEST_WGPU");
+        }
+        let output = command
             .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-g"])
             .arg("-I")
             .arg(root.join("bindings"))

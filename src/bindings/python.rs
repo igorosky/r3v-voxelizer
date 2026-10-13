@@ -1,6 +1,10 @@
 #[pyo3::pymodule]
 mod r3v_voxelizer {
-    #[cfg(any(feature = "single_threaded", feature = "multi_threaded"))]
+    #[cfg(any(
+        feature = "single_threaded",
+        feature = "multi_threaded",
+        feature = "wgpu"
+    ))]
     use crate::Voxelizer;
 
     #[pyo3::pymethods]
@@ -134,6 +138,50 @@ mod r3v_voxelizer {
         }
         fn add_points(&mut self, sensor_pos: PointF, points: Vec<PointF>) -> Vec<PointI> {
             self.0.add_points(sensor_pos, points.as_slice())
+        }
+    }
+
+    #[cfg(feature = "wgpu")]
+    #[pyo3::pyclass]
+    #[derive(Debug)]
+    struct WgpuAccelerated(crate::WgpuAccelerated);
+
+    #[cfg(feature = "wgpu")]
+    #[pyo3::pymethods]
+    impl WgpuAccelerated {
+        #[new]
+        fn new(
+            resolution: f32,
+            hit_multiplier: u32,
+            target_multiplier: u32,
+            destroy_threshold: u32,
+            construct_threshold: u32,
+            compress: bool,
+            bucket_count: u32,
+        ) -> pyo3::PyResult<Self> {
+            match pollster::block_on(crate::WgpuAccelerated::new(
+                resolution,
+                hit_multiplier,
+                target_multiplier,
+                destroy_threshold,
+                construct_threshold,
+                compress,
+                bucket_count,
+            )) {
+                Some(v) => Ok(Self(v)),
+                None => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "no GPU adapter capable of running compute shaders, bucket_count is 0 \
+                     or the hashmap does not fit the adapter's limits",
+                )),
+            }
+        }
+        fn add_points(&mut self, sensor_pos: PointF, points: Vec<PointF>) -> Vec<PointI> {
+            self.0.add_points(sensor_pos, points.as_slice())
+        }
+        /// GPU memory taken by the hashmap of `bucket_count` buckets, in bytes.
+        #[staticmethod]
+        fn memory_size(bucket_count: u32) -> u64 {
+            crate::WgpuAccelerated::memory_size(bucket_count)
         }
     }
 }

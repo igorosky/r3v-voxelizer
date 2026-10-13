@@ -9,12 +9,14 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 dashmap = { version = "6.2.1", optional = true }
+futures-channel = { version = "0.3.34", optional = true }
 hashbrown = { version = "0.17.1", optional = true }
 js-sys = { version = "0.3.106", optional = true }
 pollster = { version = "1.0.1", optional = true }
 pyo3 = { version = "0.29.3", features = ["extension-module"], optional = true }
 rayon = { version = "1.12.0", optional = true }
 wasm-bindgen = { version = "0.2.129", optional = true }
+wasm-bindgen-futures = { version = "0.4.79", optional = true }
 wgpu = { version = "30.0.1", optional = true }
 zorder = { version = "0.2.2", optional = true }
 
@@ -29,11 +31,11 @@ pyo3-build-config = { version = "0.29.3", optional = true }
 default = ["single_threaded"]
 c = ["dep:pollster", "dep:cbindgen"]
 cpp = ["dep:pollster", "dep:cbindgen"]
-js = ["dep:wasm-bindgen", "dep:js-sys"]
+js = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
 multi_threaded = ["dep:rayon", "dep:dashmap", "dep:zorder"]
 python = ["dep:pyo3", "dep:pyo3-build-config"]
 single_threaded = ["dep:hashbrown", "dep:zorder"]
-wgpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:zorder"]
+wgpu = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster", "dep:zorder"]
 
 [[test]]
 name = "c_bindings"

@@ -3,7 +3,13 @@
  *
  * Every test case runs in its own Node.js process (see tests/js_bindings.rs),
  * so a failed check throws and ends the process. Only Node.js built-ins are
- * used, there is nothing to install.
+ * used, except for the wgpu feature: Node.js has no WebGPU, so its tests take
+ * it from the `webgpu` package (Dawn), installed into tests/js/node_modules
+ * by `npm ci` in tests/js.
+ *
+ * WgpuAccelerated is created and adds points asynchronously, so the helpers
+ * creating voxelizers or adding points may return Promises and every test
+ * awaits them (a no-op for the synchronous classes).
  *
  * usage: voxelizer_tests.mjs list | run <impl>::<test> | run <test>
  */
@@ -29,7 +35,11 @@ rv.initSync({ module: readFileSync(join(PKG_DIR, `${MODULE}_bg.wasm`)) });
 export const SEED = 10;
 
 // The voxelizer class each voxelizer feature adds to the module.
-export const CLASS_OF_FEATURE = { single_threaded: "SingleThreaded" };
+export const CLASS_OF_FEATURE = { single_threaded: "SingleThreaded", wgpu: "WgpuAccelerated" };
+
+// Hashmap size of the wgpu voxelizers the tests create: 8192 pages, as in the
+// wgpu unit tests (src/wgpu.rs).
+export const WGPU_TEST_BUCKETS = 4096;
 
 // Voxelizer classes not supported in JS, the module must never have them.
 export const UNSUPPORTED_CLASSES = ["MultiThreaded"];
@@ -47,16 +57,32 @@ function enabledFeatures() {
 
 export const FEATURES = enabledFeatures();
 
+if (FEATURES.has("wgpu")) {
+    const { create, globals } = await import("webgpu");
+    Object.assign(globalThis, globals);
+    Object.defineProperty(globalThis.navigator, "gpu", { value: create([]), configurable: true });
+    // wgpu only looks for navigator.gpu when the global object is a Window
+    // or a WorkerGlobalScope, which it finds by those constructors.
+    globalThis.Window ??= class Window {};
+}
+
 /** One voxelizer type the per implementation tests run against: cls is the
- * name of its class in the module. */
+ * name of its class in the module, isAsync tells whether it is created and
+ * adds points asynchronously. */
 export class Impl {
-    constructor(name, cls) {
+    constructor(name, cls, isAsync = false) {
         this.name = name;
         this.cls = cls;
+        this.isAsync = isAsync;
     }
 }
 
-export const IMPLS = FEATURES.has("single_threaded") ? [new Impl("single", "SingleThreaded")] : [];
+export const SINGLE = new Impl("single", "SingleThreaded");
+export const WGPU = new Impl("wgpu", "WgpuAccelerated", true);
+export const IMPLS = [
+    ...(FEATURES.has("single_threaded") ? [SINGLE] : []),
+    ...(FEATURES.has("wgpu") ? [WGPU] : []),
+];
 
 // ---------------------------------------------------------------- checks
 
@@ -78,11 +104,12 @@ export function same(a, b) {
     return fmt(a) === fmt(b);
 }
 
-/** Fails unless fn throws an Error. A wasm trap (a Rust panic, after which
- * the module is in an undefined state) does not count. Returns the Error. */
-export function throwsError(fn, what) {
+/** Fails unless fn throws an Error or returns a Promise rejecting with one.
+ * A wasm trap (a Rust panic, after which the module is in an undefined state)
+ * does not count. Resolves to the Error. */
+export async function throwsError(fn, what) {
     try {
-        fn();
+        await fn();
     } catch (e) {
         check(!(e instanceof WebAssembly.RuntimeError),
             `${what}: trapped (Rust panic) instead of throwing: ${e.message}`);
@@ -121,8 +148,8 @@ function compareTuples(a, b) {
     return 0;
 }
 
-/** Checks the types of what add_points returned and gives its points as
- * sorted [x, y, z, i] arrays. */
+/** Checks the types of what add_points returned (once resolved) and gives
+ * its points as sorted [x, y, z, i] arrays. */
 export function voxels(update, context = "") {
     const prefix = context ? `${context}: ` : "";
     check(Array.isArray(update), `${prefix}add_points returned ${typeName(update)}, not an Array`);
@@ -132,9 +159,10 @@ export function voxels(update, context = "") {
     return update.map(coords).sort(compareTuples);
 }
 
-/** Compares what add_points returned with [x, y, z, i] arrays, ignoring order. */
-export function checkUpdate(update, expected, context = "") {
-    const got = voxels(update, context);
+/** Compares what add_points returned (or the Promise of it) with
+ * [x, y, z, i] arrays, ignoring order. */
+export async function checkUpdate(update, expected, context = "") {
+    const got = voxels(await update, context);
     const want = [...expected].sort(compareTuples);
     if (!same(got, want)) {
         const prefix = context ? `${context}: ` : "";
@@ -142,12 +170,12 @@ export function checkUpdate(update, expected, context = "") {
     }
 }
 
-export function expectVoxels(update, ...expected) {
-    checkUpdate(update, expected);
+export async function expectVoxels(update, ...expected) {
+    await checkUpdate(update, expected);
 }
 
-export function expectNoVoxels(update) {
-    checkUpdate(update, []);
+export async function expectNoVoxels(update) {
+    await checkUpdate(update, []);
 }
 
 // --------------------------------------------------------------- helpers
@@ -177,10 +205,15 @@ export function sensor() {
     return pf(0.5, 0.5, 0.5, 1.0);
 }
 
-export function make(impl, resolution, hitMultiplier, targetMultiplier, destroyThreshold,
+/** Resolves to a new voxelizer of the given type. */
+export async function make(impl, resolution, hitMultiplier, targetMultiplier, destroyThreshold,
     constructThreshold, compress) {
-    return new rv[impl.cls](resolution, hitMultiplier, targetMultiplier, destroyThreshold,
-        constructThreshold, compress);
+    const args = [resolution, hitMultiplier, targetMultiplier, destroyThreshold,
+        constructThreshold, compress];
+    if (impl.cls === "WgpuAccelerated") {
+        return await rv.WgpuAccelerated.create(...args, WGPU_TEST_BUCKETS);
+    }
+    return new rv[impl.cls](...args);
 }
 
 /** Resolution 1, multipliers 1, destroy at 0, construct at 1, no compression. */
@@ -201,10 +234,10 @@ export function addPoint(voxelizer, sensorPos, point) {
 /** Adds i * target_multiplier to voxel (x, y, z) (creating its page) by
  * firing a point that stays inside the sensor voxel, so nothing else gets
  * hit. The update is dropped. */
-export function seed(voxelizer, resolution, x, y, z, i) {
+export async function seed(voxelizer, resolution, x, y, z, i) {
     const fy = (y + 0.5) * resolution;
     const fz = (z + 0.5) * resolution;
-    addPoint(voxelizer, pf((x + 0.5) * resolution, fy, fz, 1.0),
+    await addPoint(voxelizer, pf((x + 0.5) * resolution, fy, fz, 1.0),
         pf((x + 0.75) * resolution, fy, fz, i));
 }
 
@@ -224,13 +257,13 @@ export function alongX(voxelizer, fromX, toX, y, z, i) {
 
 /** Seeds every hit voxel with SEED, fires one ray of intensity 1 and checks
  * that exactly those voxels dropped to SEED - 1 and that target went to 1. */
-export function checkRay(impl, sensorPos, point, target, ...hit) {
-    const v = plain(impl);
+export async function checkRay(impl, sensorPos, point, target, ...hit) {
+    const v = await plain(impl);
     for (const [x, y, z] of hit) {
-        seed(v, 1.0, x, y, z, SEED);
+        await seed(v, 1.0, x, y, z, SEED);
     }
     const expected = [...hit.map(([x, y, z]) => pi(x, y, z, SEED - 1)), pi(...target, 1)];
-    checkUpdate(addPoint(v, sensorPos, point), expected);
+    await checkUpdate(addPoint(v, sensorPos, point), expected);
 }
 
 // ------------------------------------------------------ compress helpers
@@ -284,14 +317,14 @@ function cubeFaces(dist, half, step) {
     return coords;
 }
 
-/** Runs the scenario and returns the sorted output of every call. */
-export function scenario(voxelizer) {
+/** Runs the scenario and resolves to the sorted output of every call. */
+export async function scenario(voxelizer) {
     const rng = new Lcg(0x5EED);
     const snapshot = [];
     for (const [dist, half, step, maxI] of [[50, 20, 4, 5], [100, 40, 8, 3]]) {
         const points = cubeFaces(dist, half, step)
             .map(([x, y, z]) => pf(x + 0.5, y + 0.5, z + 0.5, 1 + rng.next() % maxI));
-        snapshot.push(voxels(voxelizer.add_points(sensor(), points)));
+        snapshot.push(voxels(await voxelizer.add_points(sensor(), points)));
     }
     return snapshot;
 }
@@ -301,8 +334,8 @@ export function scenario(voxelizer) {
 /** testCases: {name, fn, perImpl, needs} objects. perImpl cases run once
  * per entry of IMPLS and get it as their argument, the others run once.
  * Cases needing a feature (from needs) that is not enabled are left out.
- * Returns the exit code. */
-export function main(testCases) {
+ * Resolves to the exit code. */
+export async function main(testCases) {
     testCases = testCases.filter(({ needs }) => needs.every((feature) => FEATURES.has(feature)));
     const args = process.argv.slice(2);
     if (args.length === 1 && args[0] === "list") {
@@ -333,9 +366,9 @@ export function main(testCases) {
         for (const testCase of testCases) {
             if (testCase.name === name && testCase.perImpl === (impl !== null)) {
                 if (testCase.perImpl) {
-                    testCase.fn(impl);
+                    await testCase.fn(impl);
                 } else {
-                    testCase.fn();
+                    await testCase.fn();
                 }
                 return 0;
             }

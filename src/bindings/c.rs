@@ -68,6 +68,53 @@ pub extern "C" fn create_multi_threaded_voxelizer(
     }
 }
 
+/// Returns NULL when there is no GPU adapter capable of running compute
+/// shaders, `bucket_count` is 0 or the hashmap does not fit the adapter's
+/// limits.
+#[unsafe(no_mangle)]
+pub extern "C" fn create_wgpu_voxelizer(
+    _resolution: f32,
+    _hit_multiplier: u32,
+    _target_multiplier: u32,
+    _destroy_threshold: u32,
+    _construct_threshold: u32,
+    _compress: bool,
+    _bucket_count: u32,
+) -> *mut c_void {
+    #[cfg(not(feature = "wgpu"))]
+    return core::ptr::null_mut();
+    #[cfg(feature = "wgpu")]
+    {
+        let voxelizer: Box<dyn Voxelizer> = Box::new(
+            match pollster::block_on(crate::WgpuAccelerated::new(
+                _resolution,
+                _hit_multiplier,
+                _target_multiplier,
+                _destroy_threshold,
+                _construct_threshold,
+                _compress,
+                _bucket_count,
+            )) {
+                Some(v) => v,
+                None => return core::ptr::null_mut(),
+            },
+        );
+        Box::into_raw(Box::new(voxelizer)) as *mut c_void
+    }
+}
+
+/// GPU memory taken by the hashmap of a wgpu voxelizer with `bucket_count`
+/// buckets, in bytes. 0 when built without wgpu.
+#[unsafe(no_mangle)]
+pub extern "C" fn wgpu_memory_size(_bucket_count: u32) -> u64 {
+    #[cfg(not(feature = "wgpu"))]
+    return 0;
+    #[cfg(feature = "wgpu")]
+    {
+        crate::WgpuAccelerated::memory_size(_bucket_count)
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn add_points(
     voxelizer: *mut c_void,

@@ -18,7 +18,12 @@ import r3v_voxelizer as rv
 SEED = 10
 
 # The voxelizer class each voxelizer feature adds to the module.
-CLASS_OF_FEATURE = {"single_threaded": "SingleThreaded", "multi_threaded": "MultiThreaded"}
+CLASS_OF_FEATURE = {"single_threaded": "SingleThreaded", "multi_threaded": "MultiThreaded",
+                    "wgpu": "WgpuAccelerated"}
+
+# Hashmap size of the wgpu voxelizers the tests create: 8192 pages, as in the
+# wgpu unit tests (src/wgpu.rs).
+WGPU_TEST_BUCKETS = 4096
 
 
 def enabled_features():
@@ -35,17 +40,25 @@ FEATURES = enabled_features()
 
 
 class Impl:
-    """One voxelizer type the per implementation tests run against."""
+    """One voxelizer type the per implementation tests run against: cls is the
+    name of its class in the module, extra the (keyword, value) of the
+    argument its constructor takes after the common ones, if any."""
 
-    def __init__(self, name, multi, threads):
+    def __init__(self, name, cls, extra=None):
         self.name = name
-        self.multi = multi
-        self.threads = threads
+        self.cls = cls
+        self.extra = extra
 
 
-SINGLE = Impl("single", False, 0)
+def multi_threaded(name, threads):
+    return Impl(name, "MultiThreaded", ("thread_count", threads))
+
+
+SINGLE = Impl("single", "SingleThreaded")
+WGPU = Impl("wgpu", "WgpuAccelerated", ("bucket_count", WGPU_TEST_BUCKETS))
 IMPLS = ([SINGLE] if "single_threaded" in FEATURES else []) + (
-    [Impl("multi_1", True, 1), Impl("multi_4", True, 4)] if "multi_threaded" in FEATURES else [])
+    [multi_threaded("multi_1", 1), multi_threaded("multi_4", 4)]
+    if "multi_threaded" in FEATURES else []) + ([WGPU] if "wgpu" in FEATURES else [])
 
 # ---------------------------------------------------------------- checks
 
@@ -122,9 +135,9 @@ def make(impl, resolution, hit_multiplier, target_multiplier, destroy_threshold,
          construct_threshold, compress):
     args = (resolution, hit_multiplier, target_multiplier, destroy_threshold,
             construct_threshold, compress)
-    if impl.multi:
-        return rv.MultiThreaded(*args, impl.threads)
-    return rv.SingleThreaded(*args)
+    if impl.extra is not None:
+        args += (impl.extra[1],)
+    return getattr(rv, impl.cls)(*args)
 
 
 def plain(impl):

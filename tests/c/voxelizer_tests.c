@@ -561,7 +561,7 @@ static void null_points_nonzero_count(const Impl *impl) {
 
 static void single_and_multi_agree(const Impl *unused) {
     (void)unused;
-    static const Impl single = {"single", false, 0};
+    static const Impl single = {"single", IMPL_SINGLE, 0};
     static const uintptr_t thread_counts[] = {1, 2, 4, 8};
     for (size_t k = 0; k < ARRAY_LEN(SCENARIO_PARAMS); ++k) {
         const ScenarioParams *p = &SCENARIO_PARAMS[k];
@@ -571,7 +571,7 @@ static void single_and_multi_agree(const Impl *unused) {
             CHECK(expected.lens[call] > 0);
         }
         for (size_t t = 0; t < ARRAY_LEN(thread_counts); ++t) {
-            Impl multi = {"multi", true, thread_counts[t]};
+            Impl multi = {"multi", IMPL_MULTI, thread_counts[t]};
             Snapshot got = scenario(make(&multi, 1.0f, 1, 1, p->destroy_threshold,
                                          p->construct_threshold, p->compress));
             char ctx[64];
@@ -587,9 +587,49 @@ static void single_and_multi_agree(const Impl *unused) {
 static void multi_thread_count_zero(const Impl *unused) {
     (void)unused;
     /* 0 means the default thread count. */
-    static const Impl multi_default = {"multi_0", true, 0};
+    static const Impl multi_default = {"multi_0", IMPL_MULTI, 0};
     basic_1d(&multi_default);
 }
+
+#ifdef R3V_TEST_WGPU
+static void single_and_wgpu_agree(const Impl *unused) {
+    (void)unused;
+    static const Impl single = {"single", IMPL_SINGLE, 0};
+    static const Impl wgpu = {"wgpu", IMPL_WGPU, 0};
+    for (size_t k = 0; k < ARRAY_LEN(SCENARIO_PARAMS); ++k) {
+        const ScenarioParams *p = &SCENARIO_PARAMS[k];
+        Snapshot expected = scenario(make(&single, 1.0f, 1, 1, p->destroy_threshold,
+                                          p->construct_threshold, p->compress));
+        for (size_t call = 0; call < SCENARIO_CALLS; ++call) {
+            CHECK(expected.lens[call] > 0);
+        }
+        Snapshot got = scenario(make(&wgpu, 1.0f, 1, 1, p->destroy_threshold,
+                                     p->construct_threshold, p->compress));
+        check_snapshot_eq(&got, &expected, p->compress ? "compress = true" : "compress = false",
+                          __FILE__, __LINE__);
+        snapshot_free(&got);
+        snapshot_free(&expected);
+    }
+}
+
+static void wgpu_zero_buckets_null(const Impl *unused) {
+    (void)unused;
+    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, false, 0) == NULL);
+}
+
+static void wgpu_memory_size_grows(const Impl *unused) {
+    (void)unused;
+    CHECK(wgpu_memory_size(1) > 0);
+    CHECK(wgpu_memory_size(2) > wgpu_memory_size(1));
+    CHECK(wgpu_memory_size(WGPU_TEST_BUCKETS) > wgpu_memory_size(2));
+}
+#else
+static void wgpu_null_without_feature(const Impl *unused) {
+    (void)unused;
+    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, false, WGPU_TEST_BUCKETS) == NULL);
+    CHECK(wgpu_memory_size(WGPU_TEST_BUCKETS) == 0);
+}
+#endif
 
 static void drop_voxelizer_null(const Impl *unused) {
     (void)unused;
@@ -683,6 +723,13 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(null_points_nonzero_count),
     GLOBAL(single_and_multi_agree),
     GLOBAL(multi_thread_count_zero),
+#ifdef R3V_TEST_WGPU
+    GLOBAL(single_and_wgpu_agree),
+    GLOBAL(wgpu_zero_buckets_null),
+    GLOBAL(wgpu_memory_size_grows),
+#else
+    GLOBAL(wgpu_null_without_feature),
+#endif
     GLOBAL(drop_voxelizer_null),
     GLOBAL(drop_update_empty),
     GLOBAL(null_voxelizer),
