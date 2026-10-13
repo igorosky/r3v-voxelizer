@@ -30,6 +30,7 @@ void *create_single_threaded_voxelizer(float _resolution,
                                        uint32_t _target_multiplier,
                                        uint32_t _destroy_threshold,
                                        uint32_t _construct_threshold,
+                                       uint32_t _max_value,
                                        bool _compress);
 
 void *create_multi_threaded_voxelizer(float _resolution,
@@ -37,6 +38,7 @@ void *create_multi_threaded_voxelizer(float _resolution,
                                       uint32_t _target_multiplier,
                                       uint32_t _destroy_threshold,
                                       uint32_t _construct_threshold,
+                                      uint32_t _max_value,
                                       bool _compress,
                                       uintptr_t _thread_count);
 
@@ -50,6 +52,7 @@ void *create_wgpu_voxelizer(float _resolution,
                             uint32_t _target_multiplier,
                             uint32_t _destroy_threshold,
                             uint32_t _construct_threshold,
+                            uint32_t _max_value,
                             bool _compress,
                             uint32_t _bucket_count);
 

@@ -34,7 +34,8 @@ struct Params {
     // Index of the first altered entry processed by `collect`
     first: u32,
     compress: u32,
-    _padding: u32,
+    // Voxel values saturate at it
+    max_value: u32,
 }
 
 // Every entry is listed at most once
@@ -258,12 +259,31 @@ fn mark_maybe_empty(entry: u32) {
     }
 }
 
+// Sum of `current` and `val` saturating at `params.max_value`
+// `min(val, ~current)` keeps the sum from wrapping around before it is capped
+@must_use
+fn capped_add(current: u32, val: u32) -> u32 {
+    return min(current + min(val, ~current), params.max_value);
+}
+
+// A plain atomicAdd followed by atomicMin could wrap around
+fn atomic_capped_add(voxel: u32, val: u32) {
+    let a = &voxels[voxel].value;
+    var current = atomicLoad(a);
+    var new_val = capped_add(current, val);
+    // Nothing to write once the voxel is at the cap
+    while new_val != current && !atomicCompareExchangeWeak(a, current, new_val).exchanged {
+        current = atomicLoad(a);
+        new_val = capped_add(current, val);
+    }
+}
+
 // Value is dropped if there is no space left for it
 fn add_val(pos: vec3i, val: StoredValue) {
     let entry = find_or_insert(pos);
     // NO_ENTRY at this point means that there is no space left
     if entry != NO_ENTRY && val != 0 {
-        atomicAdd(&voxels[voxel_pos(entry, get_z_order(pos))].value, val);
+        atomic_capped_add(voxel_pos(entry, get_z_order(pos)), val);
         mark_touched(entry);
     }
 }

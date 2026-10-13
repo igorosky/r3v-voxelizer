@@ -15,7 +15,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::{
-    Voxelizer,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -29,6 +29,17 @@ pub(crate) const COMPRESSED_PAGE_LEN: usize = 4096;
 /// Hits saturate at zero, so a voxel must hold something before a hit on
 /// it becomes observable. Hit voxels are seeded with this value.
 pub(crate) const SEED: u32 = 10;
+/// Resolution 1, multipliers 1, destroy at 0, construct at 1, no cap, no
+/// compression.
+pub(crate) const PLAIN: VoxelizerParams = VoxelizerParams {
+    resolution: 1.0,
+    hit_multiplier: 1,
+    target_multiplier: 1,
+    destroy_threshold: 0,
+    construct_threshold: 1,
+    max_value: u32::MAX,
+    compress: false,
+};
 
 /// Test only view of an implementation's internals.
 pub(crate) trait TestVoxelizer: Voxelizer + Sized {
@@ -37,6 +48,8 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
     const BITS_FOR_COMPRESSED_ZORDER_MASK: i32;
     const PAGE_SIZE: u32;
     /// `new` without anything implementation specific.
+    fn with_params(params: VoxelizerParams) -> Self;
+    /// [`TestVoxelizer::with_params`] without a cap on voxel values.
     fn make(
         resolution: f32,
         hit_multiplier: u32,
@@ -44,7 +57,17 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
         destroy_threshold: u32,
         construct_threshold: u32,
         compress: bool,
-    ) -> Self;
+    ) -> Self {
+        Self::with_params(VoxelizerParams {
+            resolution,
+            hit_multiplier,
+            target_multiplier,
+            destroy_threshold,
+            construct_threshold,
+            max_value: u32::MAX,
+            compress,
+        })
+    }
     fn get_index(&self, point: &PointI) -> PagedIndex;
     fn point_from_index(&self, idx: PagedIndex, i: u32) -> PointI;
     fn closest_boundary(upper: bool, position: f32, len: f32) -> f32;
@@ -75,13 +98,16 @@ pub(crate) fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> {
     v.sort();
     v
 }
-/// Resolution 1, multipliers 1, destroy at 0, construct at 1, no compression.
+/// Built with [`PLAIN`].
 pub(crate) fn plain<T: TestVoxelizer>() -> T {
-    T::make(1.0, 1, 1, 0, 1, false)
+    T::with_params(PLAIN)
 }
 /// Same as [`plain`] but with compression on.
 pub(crate) fn compressed<T: TestVoxelizer>() -> T {
-    T::make(1.0, 1, 1, 0, 1, true)
+    T::with_params(VoxelizerParams {
+        compress: true,
+        ..PLAIN
+    })
 }
 /// Builds points from coordinate triples sharing one intensity.
 pub(crate) fn with_i(coords: &[Coord], i: u32) -> Vec<PointI> {
@@ -240,11 +266,31 @@ pub(crate) fn along_x<T: TestVoxelizer>(
 // A deterministic, schedule independent workload used to compare
 // implementations and thread counts.
 
-/// `(destroy_threshold, construct_threshold, compress)` pairs [`scenario`]
-/// is meant to run with. With compression `destroy = construct - 1`, so a
-/// voxel above the destroy threshold has always been constructed and the
-/// destroy path never meets a missing compressed page.
-pub(crate) const SCENARIO_PARAMS: [(u32, u32, bool); 2] = [(0, 1, false), (2, 3, true)];
+/// Parameters [`scenario`] is meant to run with. With compression
+/// `destroy = construct - 1`, so a voxel above the destroy threshold has
+/// always been constructed and the destroy path never meets a missing
+/// compressed page. The caps are below the intensities of call 1, whose
+/// targets call 2 hits.
+pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 4] = [
+    PLAIN,
+    VoxelizerParams {
+        destroy_threshold: 2,
+        construct_threshold: 3,
+        compress: true,
+        ..PLAIN
+    },
+    VoxelizerParams {
+        max_value: 3,
+        ..PLAIN
+    },
+    VoxelizerParams {
+        destroy_threshold: 2,
+        construct_threshold: 3,
+        max_value: 4,
+        compress: true,
+        ..PLAIN
+    },
+];
 
 /// Tiny LCG so that the scenario needs no extra dependency.
 fn lcg(state: &mut u64) -> u32 {
@@ -400,6 +446,11 @@ macro_rules! shared_tests {
             compress_result_map_cleared_after_call,
             compress_false_leaves_none,
             compress_destroy_without_construct_panics,
+            max_value_caps_target,
+            max_value_caps_within_one_call,
+            max_value_voxel_not_permanent,
+            max_value_saturates_instead_of_overflowing,
+            max_value_with_compress,
             scenario_repeatable,
         );
     };
@@ -1351,14 +1402,101 @@ pub(crate) fn compress_destroy_without_construct_panics<T: TestVoxelizer>() {
     );
 }
 
+// --------------------------------------------------------------- max value
+
+/// [`PLAIN`] with voxel values capped at `max_value`.
+fn capped<T: TestVoxelizer>(max_value: u32) -> T {
+    T::with_params(VoxelizerParams { max_value, ..PLAIN })
+}
+
+pub(crate) fn max_value_caps_target<T: TestVoxelizer>() {
+    let mut v = capped::<T>(5);
+    assert_eq!(from_above(&mut v, (3, 0, 0), 3.0), vec![pi(3, 0, 0, 3)]);
+    assert_eq!(from_above(&mut v, (3, 0, 0), 3.0), vec![pi(3, 0, 0, 5)]);
+    // Already at the cap: nothing changes, nothing is reported.
+    assert!(from_above(&mut v, (3, 0, 0), 3.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(5));
+    assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn max_value_caps_within_one_call<T: TestVoxelizer>() {
+    // The cap applies after the target multiplier: 4 * 1 * 3 = 12 > 10.
+    let mut v = T::with_params(VoxelizerParams {
+        target_multiplier: 3,
+        max_value: 10,
+        ..PLAIN
+    });
+    let points = vec![pf(3.5, 0.5, 0.5, 1.0); 4];
+    let result = v.add_points(pf(3.5, 0.5, 1.5, 1.0), &points);
+    assert_eq!(result, vec![pi(3, 0, 0, 10)]);
+    assert_eq!(nonzero_voxels(&v), vec![pi(3, 0, 0, 10)]);
+}
+
+pub(crate) fn max_value_voxel_not_permanent<T: TestVoxelizer>() {
+    // However often a voxel is seen, as many hits as the cap clear it.
+    let mut v = capped::<T>(3);
+    for _ in 0..10 {
+        from_above(&mut v, (3, 0, 0), 1.0);
+    }
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(3));
+    for value in [2, 1] {
+        assert_eq!(
+            sorted(along_x(&mut v, 3, 5, 0, 0, 1.0)),
+            vec![pi(3, 0, 0, value), pi(5, 0, 0, 3 - value)]
+        );
+    }
+    // The last hit empties the page of (3,0,0), which gets removed.
+    let result = along_x(&mut v, 3, 4, 0, 0, 1.0);
+    assert_eq!(sorted(result), vec![pi(3, 0, 0, 0), pi(4, 0, 0, 1)]);
+    assert!(page(&v, (0, 0, 0)).is_none());
+    assert_eq!(v.pages().len(), 1);
+    assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn max_value_saturates_instead_of_overflowing<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(3, 0, 0, u32::MAX - 1);
+    assert_eq!(
+        from_above(&mut v, (3, 0, 0), 5.0),
+        vec![pi(3, 0, 0, u32::MAX)]
+    );
+    assert!(from_above(&mut v, (3, 0, 0), 5.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(u32::MAX));
+}
+
+pub(crate) fn max_value_with_compress<T: TestVoxelizer>() {
+    let mut v = T::with_params(VoxelizerParams {
+        destroy_threshold: 2,
+        construct_threshold: 3,
+        max_value: 3,
+        compress: true,
+        ..PLAIN
+    });
+    assert!(from_above(&mut v, (3, 0, 0), 2.0).is_empty());
+    // Reaching the cap constructs.
+    assert_eq!(
+        from_above(&mut v, (3, 0, 0), 2.0),
+        vec![block(3, 0, 0, block_bit(3, 0, 0))]
+    );
+    for _ in 0..10 {
+        assert!(from_above(&mut v, (3, 0, 0), 2.0).is_empty());
+    }
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(3));
+    // A single hit destroys it again.
+    let result = along_x(&mut v, 3, 5, 0, 0, 1.0);
+    assert_eq!(result, vec![block(3, 0, 0, 0)]);
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(2));
+    assert!(compressed_bits(&v).is_empty());
+}
+
 // ---------------------------------------------------------------- scenario
 
 pub(crate) fn scenario_repeatable<T: TestVoxelizer>() {
-    for (destroy, construct, compress) in SCENARIO_PARAMS {
-        let a = scenario(T::make(1.0, 1, 1, destroy, construct, compress));
+    for params in SCENARIO_PARAMS {
+        let a = scenario(T::with_params(params));
         assert!(a.results.iter().all(|r| !r.is_empty()));
-        let b = scenario(T::make(1.0, 1, 1, destroy, construct, compress));
-        assert_snapshot_eq(&a, &b, &format!("compress = {compress}"));
+        let b = scenario(T::with_params(params));
+        assert_snapshot_eq(&a, &b, &format!("{params:?}"));
     }
 }
 
@@ -1402,19 +1540,13 @@ fn cube_faces_self_check() {
 #[test]
 fn single_and_multi_agree() {
     use crate::{MultiThreaded, SingleThreaded};
-    for (destroy, construct, compress) in SCENARIO_PARAMS {
-        let expected = scenario(SingleThreaded::new(1.0, 1, 1, destroy, construct, compress));
+    for params in SCENARIO_PARAMS {
+        let expected = scenario(SingleThreaded::new(params));
         assert!(expected.results.iter().all(|r| !r.is_empty()));
         for threads in [1, 2, 4, 8] {
-            let got = scenario(
-                MultiThreaded::new(1.0, 1, 1, destroy, construct, compress, threads)
-                    .expect("thread pool must build"),
-            );
-            assert_snapshot_eq(
-                &got,
-                &expected,
-                &format!("compress = {compress}, threads = {threads}"),
-            );
+            let got =
+                scenario(MultiThreaded::new(params, threads).expect("thread pool must build"));
+            assert_snapshot_eq(&got, &expected, &format!("{params:?}, threads = {threads}"));
         }
     }
 }
@@ -1423,21 +1555,13 @@ fn single_and_multi_agree() {
 #[test]
 fn single_and_wgpu_agree() {
     use crate::{SingleThreaded, WgpuAccelerated};
-    for (destroy, construct, compress) in SCENARIO_PARAMS {
-        let expected = scenario(SingleThreaded::new(1.0, 1, 1, destroy, construct, compress));
+    for params in SCENARIO_PARAMS {
+        let expected = scenario(SingleThreaded::new(params));
         assert!(expected.results.iter().all(|r| !r.is_empty()));
         let got = scenario(
-            pollster::block_on(WgpuAccelerated::new(
-                1.0,
-                1,
-                1,
-                destroy,
-                construct,
-                compress,
-                1 << 12,
-            ))
-            .expect("a GPU adapter with compute shaders is required"),
+            pollster::block_on(WgpuAccelerated::new(params, 1 << 12))
+                .expect("a GPU adapter with compute shaders is required"),
         );
-        assert_snapshot_eq(&got, &expected, &format!("compress = {compress}"));
+        assert_snapshot_eq(&got, &expected, &format!("{params:?}"));
     }
 }

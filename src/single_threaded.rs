@@ -1,7 +1,7 @@
 use hashbrown::{HashMap, HashSet};
 
 use crate::{
-    Voxelizer,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -27,19 +27,22 @@ pub struct SingleThreaded {
     target_multiplier: u32,
     destroy_threshold: u32,
     construct_threshold: u32,
+    max_value: u32,
     zorder: ZOrder,
 }
 
 impl SingleThreaded {
     #[inline]
-    pub fn new(
-        resolution: f32,
-        hit_multiplier: u32,
-        target_multiplier: u32,
-        destroy_threshold: u32,
-        construct_threshold: u32,
-        compress: bool,
-    ) -> Self {
+    pub fn new(params: VoxelizerParams) -> Self {
+        let VoxelizerParams {
+            resolution,
+            hit_multiplier,
+            target_multiplier,
+            destroy_threshold,
+            construct_threshold,
+            max_value,
+            compress,
+        } = params;
         Self {
             voxels: HashMap::new(),
             compressed_voxels: if compress { Some(HashMap::new()) } else { None },
@@ -50,6 +53,7 @@ impl SingleThreaded {
             target_multiplier,
             destroy_threshold,
             construct_threshold,
+            max_value,
             zorder: ZOrder::default(),
         }
     }
@@ -259,7 +263,9 @@ impl SingleThreaded {
         let idx = self.get_index(point);
         let entry = self.voxels.entry(idx.0).or_insert_with(|| [0; _]);
         self.result.entry(idx).or_insert(entry[idx.1]);
-        entry[idx.1] += point.i * self.target_multiplier;
+        entry[idx.1] = entry[idx.1]
+            .saturating_add(point.i * self.target_multiplier)
+            .min(self.max_value);
     }
     fn ray_march(
         &mut self,
@@ -399,6 +405,7 @@ mod test {
         SingleThreaded,
     };
     use crate::{
+        VoxelizerParams,
         geometry::PointI,
         test::{Coord, PAGE_LEN, PagedIndex, TestVoxelizer, compressed, pi, plain},
     };
@@ -408,22 +415,8 @@ mod test {
         const BITS_FOR_COMPRESSED_ZORDER: u32 = BITS_FOR_COMPRESSED_ZORDER;
         const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = BITS_FOR_COMPRESSED_ZORDER_MASK;
         const PAGE_SIZE: u32 = PAGE_SIZE;
-        fn make(
-            resolution: f32,
-            hit_multiplier: u32,
-            target_multiplier: u32,
-            destroy_threshold: u32,
-            construct_threshold: u32,
-            compress: bool,
-        ) -> Self {
-            Self::new(
-                resolution,
-                hit_multiplier,
-                target_multiplier,
-                destroy_threshold,
-                construct_threshold,
-                compress,
-            )
+        fn with_params(params: VoxelizerParams) -> Self {
+            Self::new(params)
         }
         fn get_index(&self, point: &PointI) -> PagedIndex {
             SingleThreaded::get_index(self, point)
@@ -464,12 +457,21 @@ mod test {
 
     #[test]
     fn new_stores_parameters() {
-        let v = SingleThreaded::new(0.5, 2, 3, 4, 5, false);
+        let v = SingleThreaded::new(VoxelizerParams {
+            resolution: 0.5,
+            hit_multiplier: 2,
+            target_multiplier: 3,
+            destroy_threshold: 4,
+            construct_threshold: 5,
+            max_value: 6,
+            compress: false,
+        });
         assert_eq!(v.resolution, 0.5);
         assert_eq!(v.hit_multiplier, 2);
         assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
+        assert_eq!(v.max_value, 6);
         assert!(v.voxels.is_empty());
         assert!(v.result.is_empty());
     }

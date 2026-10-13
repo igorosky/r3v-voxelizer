@@ -69,16 +69,18 @@ mod st {
             target_multiplier: u32,
             destroy_threshold: u32,
             construct_threshold: u32,
+            max_value: u32,
             compress: bool,
         ) -> Self {
-            Self(crate::SingleThreaded::new(
+            Self(crate::SingleThreaded::new(crate::VoxelizerParams {
                 resolution,
                 hit_multiplier,
                 target_multiplier,
                 destroy_threshold,
                 construct_threshold,
+                max_value,
                 compress,
-            ))
+            }))
         }
         pub fn add_points(
             &mut self,
@@ -116,22 +118,27 @@ mod gpu {
         /// Rejects when there is no WebGPU adapter capable of running compute
         /// shaders, `bucket_count` is 0 or the hashmap does not fit the
         /// adapter's limits.
+        #[expect(clippy::too_many_arguments)]
         pub async fn create(
             resolution: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
             construct_threshold: u32,
+            max_value: u32,
             compress: bool,
             bucket_count: u32,
         ) -> Result<WgpuAccelerated, JsError> {
             crate::WgpuAccelerated::new(
-                resolution,
-                hit_multiplier,
-                target_multiplier,
-                destroy_threshold,
-                construct_threshold,
-                compress,
+                crate::VoxelizerParams {
+                    resolution,
+                    hit_multiplier,
+                    target_multiplier,
+                    destroy_threshold,
+                    construct_threshold,
+                    max_value,
+                    compress,
+                },
                 bucket_count,
             )
             .await

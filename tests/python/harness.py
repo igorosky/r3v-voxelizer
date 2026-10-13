@@ -132,9 +132,11 @@ def sensor():
 
 
 def make(impl, resolution, hit_multiplier, target_multiplier, destroy_threshold,
-         construct_threshold, compress):
+         construct_threshold, compress, max_value=0xFFFFFFFF):
+    """A new voxelizer of the given type, without a cap on voxel values unless
+    max_value is given."""
     args = (resolution, hit_multiplier, target_multiplier, destroy_threshold,
-            construct_threshold, compress)
+            construct_threshold, max_value, compress)
     if impl.extra is not None:
         args += (impl.extra[1],)
     return getattr(rv, impl.cls)(*args)

@@ -520,6 +520,17 @@ static void compress_mask_accumulates_across_calls(const Impl *impl) {
     drop_voxelizer(v);
 }
 
+/* -------------------------------------------------------- max value */
+
+static void max_value_caps_target(const Impl *impl) {
+    void *v = make_capped(impl, 1.0f, 1, 1, 0, 1, 5, false);
+    EXPECT_VOXELS(from_above(v, 3, 0, 0, 3.0f), pi(3, 0, 0, 3));
+    EXPECT_VOXELS(from_above(v, 3, 0, 0, 3.0f), pi(3, 0, 0, 5));
+    /* Already at the cap: nothing changes, nothing is reported. */
+    EXPECT_NO_VOXELS(from_above(v, 3, 0, 0, 3.0f));
+    drop_voxelizer(v);
+}
+
 /* --------------------------------------------------------- scenario */
 
 static void scenario_repeatable(const Impl *impl) {
@@ -614,7 +625,7 @@ static void single_and_wgpu_agree(const Impl *unused) {
 
 static void wgpu_zero_buckets_null(const Impl *unused) {
     (void)unused;
-    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, false, 0) == NULL);
+    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, UINT32_MAX, false, 0) == NULL);
 }
 
 static void wgpu_memory_size_grows(const Impl *unused) {
@@ -626,7 +637,7 @@ static void wgpu_memory_size_grows(const Impl *unused) {
 #else
 static void wgpu_null_without_feature(const Impl *unused) {
     (void)unused;
-    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, false, WGPU_TEST_BUCKETS) == NULL);
+    CHECK(create_wgpu_voxelizer(1.0f, 1, 1, 0, 1, UINT32_MAX, false, WGPU_TEST_BUCKETS) == NULL);
     CHECK(wgpu_memory_size(WGPU_TEST_BUCKETS) == 0);
 }
 #endif
@@ -718,6 +729,7 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(compress_page_keys),
     PER_IMPL(compress_block_coords_far),
     PER_IMPL(compress_mask_accumulates_across_calls),
+    PER_IMPL(max_value_caps_target),
     PER_IMPL(scenario_repeatable),
     PER_IMPL(null_points_zero_count),
     PER_IMPL(null_points_nonzero_count),

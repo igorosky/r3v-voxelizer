@@ -1,5 +1,5 @@
 use crate::{
-    Voxelizer,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI},
 };
 
@@ -88,6 +88,7 @@ pub struct WgpuAccelerated {
     target_multiplier: u32,
     destroy_threshold: u32,
     construct_threshold: u32,
+    max_value: u32,
     compress: bool,
 }
 
@@ -201,15 +202,16 @@ impl WgpuAccelerated {
     /// Returns `None` when there is no adapter capable of running compute
     /// shaders, `bucket_count` is 0 or the hashmap does not fit the adapter's
     /// limits.
-    pub async fn new(
-        resolution: f32,
-        hit_multiplier: u32,
-        target_multiplier: u32,
-        destroy_threshold: u32,
-        construct_threshold: u32,
-        compress: bool,
-        bucket_count: u32,
-    ) -> Option<Self> {
+    pub async fn new(params: VoxelizerParams, bucket_count: u32) -> Option<Self> {
+        let VoxelizerParams {
+            resolution,
+            hit_multiplier,
+            target_multiplier,
+            destroy_threshold,
+            construct_threshold,
+            max_value,
+            compress,
+        } = params;
         let entry_count = u64::from(bucket_count) * BUCKET_SIZE;
         let voxel_count = entry_count * ENTRY_VOXEL_COUNT;
         // Voxels are indexed with u32 in the shader
@@ -375,6 +377,7 @@ impl WgpuAccelerated {
             target_multiplier,
             destroy_threshold,
             construct_threshold,
+            max_value,
             compress,
         })
     }
@@ -476,7 +479,7 @@ impl WgpuAccelerated {
             count,
             first,
             u32::from(self.compress),
-            0,
+            self.max_value,
         ];
         self.queue
             .write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
@@ -563,11 +566,11 @@ mod test {
         Kernel, VOXEL_BYTES, WgpuAccelerated,
     };
     use crate::{
-        Voxelizer,
+        Voxelizer, VoxelizerParams,
         geometry::{PointI, ZOrder},
         test::{
-            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PagedIndex, TestVoxelizer, along_x, cube_faces,
-            from_above, get_voxel, nonzero_voxels, pf, pi, seed, sorted, with_i,
+            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PLAIN, PagedIndex, TestVoxelizer, along_x,
+            cube_faces, from_above, get_voxel, nonzero_voxels, pf, pi, seed, sorted, with_i,
         },
     };
 
@@ -581,6 +584,12 @@ mod test {
     const ENTRY_TOUCHED: u32 = 1;
     const ENTRY_MAYBE_EMPTY: u32 = 2;
 
+    fn with_buckets(params: VoxelizerParams, bucket_count: u32) -> WgpuAccelerated {
+        pollster::block_on(WgpuAccelerated::new(params, bucket_count))
+            .expect("a GPU adapter with compute shaders is required")
+    }
+
+    /// Without a cap on voxel values.
     fn new(
         resolution: f32,
         hit_multiplier: u32,
@@ -590,16 +599,18 @@ mod test {
         compress: bool,
         bucket_count: u32,
     ) -> WgpuAccelerated {
-        pollster::block_on(WgpuAccelerated::new(
-            resolution,
-            hit_multiplier,
-            target_multiplier,
-            destroy_threshold,
-            construct_threshold,
-            compress,
+        with_buckets(
+            VoxelizerParams {
+                resolution,
+                hit_multiplier,
+                target_multiplier,
+                destroy_threshold,
+                construct_threshold,
+                max_value: u32::MAX,
+                compress,
+            },
             bucket_count,
-        ))
-        .expect("a GPU adapter with compute shaders is required")
+        )
     }
 
     /// Occupied hashmap entry (page) read back from the GPU.
@@ -677,23 +688,8 @@ mod test {
         const BITS_FOR_COMPRESSED_ZORDER: u32 = BITS_FOR_COMPRESSED_ZORDER;
         const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = BITS_FOR_COMPRESSED_ZORDER_MASK;
         const PAGE_SIZE: u32 = COMPRESSED_PAGE_LEN as u32;
-        fn make(
-            resolution: f32,
-            hit_multiplier: u32,
-            target_multiplier: u32,
-            destroy_threshold: u32,
-            construct_threshold: u32,
-            compress: bool,
-        ) -> Self {
-            new(
-                resolution,
-                hit_multiplier,
-                target_multiplier,
-                destroy_threshold,
-                construct_threshold,
-                compress,
-                TEST_BUCKETS,
-            )
+        fn with_params(params: VoxelizerParams) -> Self {
+            with_buckets(params, TEST_BUCKETS)
         }
         // Same z-order as the shader's `get_z_order`
         fn get_index(&self, point: &PointI) -> PagedIndex {
@@ -782,12 +778,24 @@ mod test {
 
     #[test]
     fn new_stores_parameters() {
-        let v = new(0.5, 2, 3, 4, 5, false, 16);
+        let v = with_buckets(
+            VoxelizerParams {
+                resolution: 0.5,
+                hit_multiplier: 2,
+                target_multiplier: 3,
+                destroy_threshold: 4,
+                construct_threshold: 5,
+                max_value: 6,
+                compress: false,
+            },
+            16,
+        );
         assert_eq!(v.resolution, 0.5);
         assert_eq!(v.hit_multiplier, 2);
         assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
+        assert_eq!(v.max_value, 6);
         assert!(!v.compress);
         assert_eq!(v.buckets.size(), 16 * BUCKET_BYTES);
         assert_eq!(
@@ -800,11 +808,9 @@ mod test {
 
     #[test]
     fn new_rejects_invalid_bucket_count() {
-        assert!(pollster::block_on(WgpuAccelerated::new(1.0, 1, 1, 0, 1, false, 0)).is_none());
+        assert!(pollster::block_on(WgpuAccelerated::new(PLAIN, 0)).is_none());
         // Voxel indices would not fit u32
-        assert!(
-            pollster::block_on(WgpuAccelerated::new(1.0, 1, 1, 0, 1, false, u32::MAX)).is_none()
-        );
+        assert!(pollster::block_on(WgpuAccelerated::new(PLAIN, u32::MAX)).is_none());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use rayon::{
 };
 
 use crate::{
-    Voxelizer,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -31,21 +31,23 @@ pub struct MultiThreaded {
     target_multiplier: u32,
     destroy_threshold: u32,
     construct_threshold: u32,
+    max_value: u32,
     zorder: ZOrder,
     thread_pool: ThreadPool,
 }
 
 impl MultiThreaded {
     #[inline]
-    pub fn new(
-        resolution: f32,
-        hit_multiplier: u32,
-        target_multiplier: u32,
-        destroy_threshold: u32,
-        construct_threshold: u32,
-        compress: bool,
-        thread_count: usize,
-    ) -> Result<Self, ThreadPoolBuildError> {
+    pub fn new(params: VoxelizerParams, thread_count: usize) -> Result<Self, ThreadPoolBuildError> {
+        let VoxelizerParams {
+            resolution,
+            hit_multiplier,
+            target_multiplier,
+            destroy_threshold,
+            construct_threshold,
+            max_value,
+            compress,
+        } = params;
         Ok(Self {
             voxels: DashMap::new(),
             compressed_voxels: if compress { Some(DashMap::new()) } else { None },
@@ -56,6 +58,7 @@ impl MultiThreaded {
             target_multiplier,
             destroy_threshold,
             construct_threshold,
+            max_value,
             zorder: ZOrder::default(),
             thread_pool: ThreadPoolBuilder::new().num_threads(thread_count).build()?,
         })
@@ -275,7 +278,9 @@ impl MultiThreaded {
         let idx = self.get_index(point);
         let mut entry = self.voxels.entry(idx.0).or_insert_with(|| [0; _]);
         self.result.entry(idx).or_insert(entry[idx.1]);
-        entry[idx.1] += point.i * self.target_multiplier;
+        entry[idx.1] = entry[idx.1]
+            .saturating_add(point.i * self.target_multiplier)
+            .min(self.max_value);
     }
     fn ray_march(&self, mut sensor_pos: PointI, sensor_pos_divided: &PointF, mut point: PointF) {
         // http://www.cse.yorku.ca/~amana/research/grid.pdf
@@ -410,10 +415,10 @@ mod test {
         MultiThreaded, PAGE_SIZE,
     };
     use crate::{
-        Voxelizer,
+        Voxelizer, VoxelizerParams,
         geometry::PointI,
         test::{
-            Coord, PAGE_LEN, PagedIndex, SCENARIO_PARAMS, TestVoxelizer, assert_snapshot_eq,
+            Coord, PAGE_LEN, PLAIN, PagedIndex, SCENARIO_PARAMS, TestVoxelizer, assert_snapshot_eq,
             compressed_bits, compressed_word, cube_faces, get_voxel, nonzero_voxels, page_bit, pf,
             pi, scenario, seed, sorted, with_i,
         },
@@ -422,6 +427,7 @@ mod test {
     /// Thread count used by the shared suite.
     const THREADS: usize = 4;
 
+    /// Without a cap on voxel values.
     fn new(
         resolution: f32,
         hit_multiplier: u32,
@@ -432,12 +438,15 @@ mod test {
         thread_count: usize,
     ) -> MultiThreaded {
         MultiThreaded::new(
-            resolution,
-            hit_multiplier,
-            target_multiplier,
-            destroy_threshold,
-            construct_threshold,
-            compress,
+            VoxelizerParams {
+                resolution,
+                hit_multiplier,
+                target_multiplier,
+                destroy_threshold,
+                construct_threshold,
+                max_value: u32::MAX,
+                compress,
+            },
             thread_count,
         )
         .expect("thread pool must build")
@@ -448,23 +457,8 @@ mod test {
         const BITS_FOR_COMPRESSED_ZORDER: u32 = BITS_FOR_COMPRESSED_ZORDER;
         const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = BITS_FOR_COMPRESSED_ZORDER_MASK;
         const PAGE_SIZE: u32 = PAGE_SIZE;
-        fn make(
-            resolution: f32,
-            hit_multiplier: u32,
-            target_multiplier: u32,
-            destroy_threshold: u32,
-            construct_threshold: u32,
-            compress: bool,
-        ) -> Self {
-            new(
-                resolution,
-                hit_multiplier,
-                target_multiplier,
-                destroy_threshold,
-                construct_threshold,
-                compress,
-                THREADS,
-            )
+        fn with_params(params: VoxelizerParams) -> Self {
+            MultiThreaded::new(params, THREADS).expect("thread pool must build")
         }
         fn get_index(&self, point: &PointI) -> PagedIndex {
             MultiThreaded::get_index(self, point)
@@ -505,12 +499,22 @@ mod test {
 
     #[test]
     fn new_stores_parameters() {
-        let v = new(0.5, 2, 3, 4, 5, false, 3);
+        let params = VoxelizerParams {
+            resolution: 0.5,
+            hit_multiplier: 2,
+            target_multiplier: 3,
+            destroy_threshold: 4,
+            construct_threshold: 5,
+            max_value: 6,
+            compress: false,
+        };
+        let v = MultiThreaded::new(params, 3).expect("thread pool must build");
         assert_eq!(v.resolution, 0.5);
         assert_eq!(v.hit_multiplier, 2);
         assert_eq!(v.target_multiplier, 3);
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
+        assert_eq!(v.max_value, 6);
         assert_eq!(v.thread_pool.current_num_threads(), 3);
         assert!(v.voxels.is_empty());
         assert!(v.result.is_empty());
@@ -520,7 +524,7 @@ mod test {
 
     #[test]
     fn new_thread_count_zero_uses_default() {
-        let v = MultiThreaded::new(1.0, 1, 1, 0, 1, false, 0).expect("0 means default");
+        let v = MultiThreaded::new(PLAIN, 0).expect("0 means default");
         assert!(v.thread_pool.current_num_threads() >= 1);
     }
 
@@ -535,16 +539,14 @@ mod test {
 
     #[test]
     fn same_result_for_any_thread_count() {
-        for (destroy, construct, compress) in SCENARIO_PARAMS {
-            let expected = scenario(new(1.0, 1, 1, destroy, construct, compress, 1));
+        let make =
+            |params, threads| MultiThreaded::new(params, threads).expect("thread pool must build");
+        for params in SCENARIO_PARAMS {
+            let expected = scenario(make(params, 1));
             assert!(expected.results.iter().all(|r| !r.is_empty()));
             for threads in [2, 4, 8, 16] {
-                let got = scenario(new(1.0, 1, 1, destroy, construct, compress, threads));
-                assert_snapshot_eq(
-                    &got,
-                    &expected,
-                    &format!("compress = {compress}, threads = {threads}"),
-                );
+                let got = scenario(make(params, threads));
+                assert_snapshot_eq(&got, &expected, &format!("{params:?}, threads = {threads}"));
             }
         }
     }

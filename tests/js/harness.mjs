@@ -205,11 +205,12 @@ export function sensor() {
     return pf(0.5, 0.5, 0.5, 1.0);
 }
 
-/** Resolves to a new voxelizer of the given type. */
+/** Resolves to a new voxelizer of the given type, without a cap on voxel
+ * values unless maxValue is given. */
 export async function make(impl, resolution, hitMultiplier, targetMultiplier, destroyThreshold,
-    constructThreshold, compress) {
+    constructThreshold, compress, maxValue = 0xFFFFFFFF) {
     const args = [resolution, hitMultiplier, targetMultiplier, destroyThreshold,
-        constructThreshold, compress];
+        constructThreshold, maxValue, compress];
     if (impl.cls === "WgpuAccelerated") {
         return await rv.WgpuAccelerated.create(...args, WGPU_TEST_BUCKETS);
     }

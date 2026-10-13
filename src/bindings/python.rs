@@ -89,16 +89,18 @@ mod r3v_voxelizer {
             target_multiplier: u32,
             destroy_threshold: u32,
             construct_threshold: u32,
+            max_value: u32,
             compress: bool,
         ) -> Self {
-            Self(crate::SingleThreaded::new(
+            Self(crate::SingleThreaded::new(crate::VoxelizerParams {
                 resolution,
                 hit_multiplier,
                 target_multiplier,
                 destroy_threshold,
                 construct_threshold,
+                max_value,
                 compress,
-            ))
+            }))
         }
         fn add_points(&mut self, sensor_pos: PointF, points: Vec<PointF>) -> Vec<PointI> {
             self.0.add_points(sensor_pos, points.as_slice())
@@ -114,22 +116,27 @@ mod r3v_voxelizer {
     #[pyo3::pymethods]
     impl MultiThreaded {
         #[new]
+        #[expect(clippy::too_many_arguments)]
         fn new(
             resolution: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
             construct_threshold: u32,
+            max_value: u32,
             compress: bool,
             thread_count: usize,
         ) -> pyo3::PyResult<Self> {
             match crate::MultiThreaded::new(
-                resolution,
-                hit_multiplier,
-                target_multiplier,
-                destroy_threshold,
-                construct_threshold,
-                compress,
+                crate::VoxelizerParams {
+                    resolution,
+                    hit_multiplier,
+                    target_multiplier,
+                    destroy_threshold,
+                    construct_threshold,
+                    max_value,
+                    compress,
+                },
                 thread_count,
             ) {
                 Ok(v) => Ok(Self(v)),
@@ -150,22 +157,27 @@ mod r3v_voxelizer {
     #[pyo3::pymethods]
     impl WgpuAccelerated {
         #[new]
+        #[expect(clippy::too_many_arguments)]
         fn new(
             resolution: f32,
             hit_multiplier: u32,
             target_multiplier: u32,
             destroy_threshold: u32,
             construct_threshold: u32,
+            max_value: u32,
             compress: bool,
             bucket_count: u32,
         ) -> pyo3::PyResult<Self> {
             match pollster::block_on(crate::WgpuAccelerated::new(
-                resolution,
-                hit_multiplier,
-                target_multiplier,
-                destroy_threshold,
-                construct_threshold,
-                compress,
+                crate::VoxelizerParams {
+                    resolution,
+                    hit_multiplier,
+                    target_multiplier,
+                    destroy_threshold,
+                    construct_threshold,
+                    max_value,
+                    compress,
+                },
                 bucket_count,
             )) {
                 Some(v) => Ok(Self(v)),

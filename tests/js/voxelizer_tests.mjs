@@ -99,7 +99,7 @@ function point_i_setter_wraps() {
 }
 
 async function constructors_accept_u32_max(impl) {
-    const v = await make(impl, 1.0, U32_MAX, U32_MAX, U32_MAX, U32_MAX, true);
+    const v = await make(impl, 1.0, U32_MAX, U32_MAX, U32_MAX, U32_MAX, true, U32_MAX);
     check(v instanceof rv[impl.cls]);
 }
 
@@ -705,6 +705,16 @@ async function compress_mask_accumulates_across_calls(impl) {
     await expectVoxels(fromAbove(v, 2, 0, 1, 1.0), pi(0, 0, 0, 0x3 | 1 << 18));
 }
 
+// ----------------------------------------------------------- max value
+
+async function max_value_caps_target(impl) {
+    const v = await make(impl, 1.0, 1, 1, 0, 1, false, 5);
+    await expectVoxels(fromAbove(v, 3, 0, 0, 3.0), pi(3, 0, 0, 3));
+    await expectVoxels(fromAbove(v, 3, 0, 0, 3.0), pi(3, 0, 0, 5));
+    // Already at the cap: nothing changes, nothing is reported.
+    await expectNoVoxels(fromAbove(v, 3, 0, 0, 3.0));
+}
+
 // ------------------------------------------------------------ scenario
 
 async function scenario_repeatable(impl) {
@@ -732,7 +742,7 @@ async function single_and_wgpu_agree() {
 }
 
 async function wgpu_create_is_async() {
-    const created = rv.WgpuAccelerated.create(1.0, 1, 1, 0, 1, false, WGPU_TEST_BUCKETS);
+    const created = rv.WgpuAccelerated.create(1.0, 1, 1, 0, 1, U32_MAX, false, WGPU_TEST_BUCKETS);
     check(created instanceof Promise, "WgpuAccelerated.create did not return a Promise");
     const v = await created;
     check(v instanceof rv.WgpuAccelerated, `created a ${v?.constructor?.name}`);
@@ -740,7 +750,7 @@ async function wgpu_create_is_async() {
 }
 
 async function wgpu_rejects_zero_buckets() {
-    await throwsError(() => rv.WgpuAccelerated.create(1.0, 1, 1, 0, 1, false, 0),
+    await throwsError(() => rv.WgpuAccelerated.create(1.0, 1, 1, 0, 1, U32_MAX, false, 0),
         "WgpuAccelerated.create with 0 buckets");
 }
 
@@ -855,6 +865,7 @@ const TEST_CASES = [
     perImpl(compress_page_keys),
     perImpl(compress_block_coords_far),
     perImpl(compress_mask_accumulates_across_calls),
+    perImpl(max_value_caps_target),
     perImpl(scenario_repeatable),
     once(single_and_wgpu_agree, "single_threaded", "wgpu"),
     once(wgpu_create_is_async, "wgpu"),

@@ -11,6 +11,31 @@ pub struct VoxelsUpdate {
     len: usize,
 }
 
+#[cfg(any(
+    feature = "single_threaded",
+    feature = "multi_threaded",
+    feature = "wgpu"
+))]
+fn params(
+    resolution: f32,
+    hit_multiplier: u32,
+    target_multiplier: u32,
+    destroy_threshold: u32,
+    construct_threshold: u32,
+    max_value: u32,
+    compress: bool,
+) -> crate::VoxelizerParams {
+    crate::VoxelizerParams {
+        resolution,
+        hit_multiplier,
+        target_multiplier,
+        destroy_threshold,
+        construct_threshold,
+        max_value,
+        compress,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn create_single_threaded_voxelizer(
     _resolution: f32,
@@ -18,20 +43,22 @@ pub extern "C" fn create_single_threaded_voxelizer(
     _target_multiplier: u32,
     _destroy_threshold: u32,
     _construct_threshold: u32,
+    _max_value: u32,
     _compress: bool,
 ) -> *mut c_void {
     #[cfg(not(feature = "single_threaded"))]
     return core::ptr::null_mut();
     #[cfg(feature = "single_threaded")]
     {
-        let voxelizer: Box<dyn Voxelizer> = Box::new(crate::SingleThreaded::new(
+        let voxelizer: Box<dyn Voxelizer> = Box::new(crate::SingleThreaded::new(params(
             _resolution,
             _hit_multiplier,
             _target_multiplier,
             _destroy_threshold,
             _construct_threshold,
+            _max_value,
             _compress,
-        ));
+        )));
         Box::into_raw(Box::new(voxelizer)) as *mut c_void
     }
 }
@@ -43,6 +70,7 @@ pub extern "C" fn create_multi_threaded_voxelizer(
     _target_multiplier: u32,
     _destroy_threshold: u32,
     _construct_threshold: u32,
+    _max_value: u32,
     _compress: bool,
     _thread_count: usize,
 ) -> *mut c_void {
@@ -52,12 +80,15 @@ pub extern "C" fn create_multi_threaded_voxelizer(
     {
         let voxelizer: Box<dyn Voxelizer> = Box::new(
             match crate::MultiThreaded::new(
-                _resolution,
-                _hit_multiplier,
-                _target_multiplier,
-                _destroy_threshold,
-                _construct_threshold,
-                _compress,
+                params(
+                    _resolution,
+                    _hit_multiplier,
+                    _target_multiplier,
+                    _destroy_threshold,
+                    _construct_threshold,
+                    _max_value,
+                    _compress,
+                ),
                 _thread_count,
             ) {
                 Ok(v) => v,
@@ -78,6 +109,7 @@ pub extern "C" fn create_wgpu_voxelizer(
     _target_multiplier: u32,
     _destroy_threshold: u32,
     _construct_threshold: u32,
+    _max_value: u32,
     _compress: bool,
     _bucket_count: u32,
 ) -> *mut c_void {
@@ -87,12 +119,15 @@ pub extern "C" fn create_wgpu_voxelizer(
     {
         let voxelizer: Box<dyn Voxelizer> = Box::new(
             match pollster::block_on(crate::WgpuAccelerated::new(
-                _resolution,
-                _hit_multiplier,
-                _target_multiplier,
-                _destroy_threshold,
-                _construct_threshold,
-                _compress,
+                params(
+                    _resolution,
+                    _hit_multiplier,
+                    _target_multiplier,
+                    _destroy_threshold,
+                    _construct_threshold,
+                    _max_value,
+                    _compress,
+                ),
                 _bucket_count,
             )) {
                 Some(v) => v,
