@@ -51,3 +51,7 @@ required-features = ["python"]
 name = "js_bindings"
 harness = false
 required-features = ["js"]
+
+[[bench]]
+name = "voxelizer"
+harness = false

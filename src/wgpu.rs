@@ -16,7 +16,7 @@ const BUCKET_BYTES: u64 = BUCKET_SIZE * ENTRY_BYTES;
 const VOXEL_BYTES: u64 = 2 * 4;
 /// `EntryList` header: len
 const ENTRY_LIST_HEADER_BYTES: u64 = 4;
-/// `Output` header: len + error, padded to the alignment of `vec4i`
+/// `Output` header: len, padded to the alignment of `vec4i`
 const OUTPUT_HEADER_BYTES: u64 = 16;
 /// `Params`
 const PARAMS_BYTES: u64 = 16 * 4;
@@ -148,7 +148,7 @@ impl WgpuAccelerated {
         for first in (0..altered).step_by(entries_per_chunk as usize) {
             let count = entries_per_chunk.min(altered - first);
             self.reserve_output(u64::from(count * per_entry));
-            self.queue.write_buffer(&self.output, 0, &[0; 8]);
+            self.queue.write_buffer(&self.output, 0, &[0; 4]);
             self.write_params([0.0; 3], count, first);
             let mut encoder = self.encoder();
             self.dispatch(&mut encoder, Kernel::Collect, count * 2);
@@ -157,12 +157,7 @@ impl WgpuAccelerated {
                 self.dispatch(&mut encoder, Kernel::RemoveEmpty, altered);
                 self.dispatch(&mut encoder, Kernel::ReclaimRemoved, altered);
             }
-            let [len, error] = self.read_words(encoder, &self.output, 0, 2).await[..] else {
-                unreachable!("2 words are read");
-            };
-            if error != 0 {
-                panic!("It must have existed if it is destroyed");
-            }
+            let len = self.read_words(encoder, &self.output, 0, 1).await[0];
             if len != 0 {
                 let data = self
                     .read_back(

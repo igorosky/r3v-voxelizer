@@ -145,23 +145,23 @@ impl Voxelizer for MultiThreaded {
                             idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
                         )
                     };
+                    let bit: u64 = 1 << x << (y << 2) << (z << 4);
+                    // A voxel between the thresholds keeps its state, so a
+                    // crossing changes it only when it is in the other one
                     if prev < self.construct_threshold && voxel >= self.construct_threshold {
                         let v =
                             &mut compressed_voxels.entry(idx()).or_insert_with(|| [0; _])[idx2()];
-                        *v |= 1 << x << (y << 2) << (z << 4);
-                        changed(*v);
-                    } else if prev > self.destroy_threshold && voxel <= self.destroy_threshold {
-                        debug_assert!(
-                            compressed_voxels
-                                .get_mut(&idx())
-                                .expect("It must have existed if it is destroyed")[idx2()]
-                                & (1 << x << (y << 2) << (z << 4))
-                                != 0
-                        );
-                        let v = &mut compressed_voxels
-                            .get_mut(&idx())
-                            .expect("It must have existed if it is destroyed")[idx2()];
-                        *v ^= 1 << x << (y << 2) << (z << 4);
+                        if *v & bit == 0 {
+                            *v |= bit;
+                            changed(*v);
+                        }
+                    } else if prev > self.destroy_threshold
+                        && voxel <= self.destroy_threshold
+                        && let Some(mut words) = compressed_voxels.get_mut(&idx())
+                        && words[idx2()] & bit != 0
+                    {
+                        let v = &mut words[idx2()];
+                        *v &= !bit;
                         changed(*v);
                         if *v == 0 {
                             emptied_compressed.insert(idx());

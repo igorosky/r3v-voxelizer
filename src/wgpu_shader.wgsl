@@ -52,8 +52,6 @@ struct EntryList {
 
 struct Output {
     len: atomic<u32>,
-    // Set when a voxel is destroyed without having been constructed
-    error: atomic<u32>,
     data: array<vec4i>,
 }
 
@@ -500,15 +498,13 @@ fn collect(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgro
         }
         voxels[voxel].prev = value;
         let mask = 1u << bit;
+        // A voxel between the thresholds keeps its state, so a crossing changes it only when it is in the other one
         if params.compress == 0 {
             append_output(origin + local, value);
-        } else if prev < params.construct_threshold && value >= params.construct_threshold {
+        } else if prev < params.construct_threshold && value >= params.construct_threshold && (pack & mask) == 0 {
             pack |= mask;
             changed = true;
-        } else if prev > params.destroy_threshold && value <= params.destroy_threshold {
-            if (pack & mask) == 0 {
-                atomicStore(&output.error, 1);
-            }
+        } else if prev > params.destroy_threshold && value <= params.destroy_threshold && (pack & mask) != 0 {
             pack &= ~mask;
             changed = true;
         }

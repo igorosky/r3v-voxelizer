@@ -35,9 +35,11 @@ pub struct VoxelizerParams {
     pub hit_multiplier: u32,
     /// Scales the intensity added to the voxel a ray ends in.
     pub target_multiplier: u32,
-    /// With `compress`, a voxel dropping to it or below gets destroyed.
+    /// With `compress`, a constructed voxel dropping to it or below gets
+    /// destroyed.
     pub destroy_threshold: u32,
-    /// With `compress`, a voxel reaching it gets constructed.
+    /// With `compress`, a voxel that is not constructed gets constructed when
+    /// it reaches it. A voxel between the thresholds keeps its state.
     pub construct_threshold: u32,
     /// Voxel values saturate at it, so a voxel seen many times can still be
     /// cleared by later hits. `u32::MAX` for no cap.
