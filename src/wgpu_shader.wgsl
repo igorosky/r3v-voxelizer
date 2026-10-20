@@ -331,6 +331,18 @@ fn closest_boundary(dir: vec3i, position: vec3f, ray: vec3f) -> vec3f {
     return (boundary - position) / ray;
 }
 
+// `t_max` of an axis that reached the target, finite since shaders may assume there are no infinities
+const T_MAX_REACHED: f32 = 3.40282347e38;
+
+// `t_max` of an axis after a step along it
+// An axis that reached the target is never stepped again: when the point lies on boundaries of several axes
+// (or due to float errors) its next crossing can tie with the last one of another axis,
+// and stepping it would walk past the target
+@must_use
+fn next_t_max(t_max: f32, delta: f32, reached: bool) -> f32 {
+    return select(t_max + delta, T_MAX_REACHED, reached);
+}
+
 // Inserts nothing, so it can use `sub_val_if_exists`
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workgroups) num_workgroups: vec3u) {
@@ -386,10 +398,10 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
             sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.y {
                 sensor_pos.x += dir.x;
-                t_max.x += delta.x;
+                t_max.x = next_t_max(t_max.x, delta.x, sensor_pos.x == target_point.x);
             } else {
                 sensor_pos.y += dir.y;
-                t_max.y += delta.y;
+                t_max.y = next_t_max(t_max.y, delta.y, sensor_pos.y == target_point.y);
             }
         }
     }
@@ -401,10 +413,10 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
             sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.y {
                 sensor_pos.x += dir.x;
-                t_max.x += delta.x;
+                t_max.x = next_t_max(t_max.x, delta.x, sensor_pos.x == target_point.x);
             } else {
                 sensor_pos.z += dir.z;
-                t_max.y += delta.y;
+                t_max.y = next_t_max(t_max.y, delta.y, sensor_pos.z == target_point.z);
             }
         }
     }
@@ -416,10 +428,10 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
             sub_val_if_exists(sensor_pos, hit_value);
             if t_max.x < t_max.y {
                 sensor_pos.y += dir.y;
-                t_max.x += delta.x;
+                t_max.x = next_t_max(t_max.x, delta.x, sensor_pos.y == target_point.y);
             } else {
                 sensor_pos.z += dir.z;
-                t_max.y += delta.y;
+                t_max.y = next_t_max(t_max.y, delta.y, sensor_pos.z == target_point.z);
             }
         }
     }
@@ -433,18 +445,18 @@ fn ray_march(@builtin(global_invocation_id) global_id: vec3u, @builtin(num_workg
             if t_max.x < t_max.z {
                 if t_max.x < t_max.y {
                     sensor_pos.x += dir.x;
-                    t_max.x += delta.x;
+                    t_max.x = next_t_max(t_max.x, delta.x, sensor_pos.x == target_point.x);
                 } else {
                     sensor_pos.y += dir.y;
-                    t_max.y += delta.y;
+                    t_max.y = next_t_max(t_max.y, delta.y, sensor_pos.y == target_point.y);
                 }
             } else {
                 if t_max.y < t_max.z {
                     sensor_pos.y += dir.y;
-                    t_max.y += delta.y;
+                    t_max.y = next_t_max(t_max.y, delta.y, sensor_pos.y == target_point.y);
                 } else {
                     sensor_pos.z += dir.z;
-                    t_max.z += delta.z;
+                    t_max.z = next_t_max(t_max.z, delta.z, sensor_pos.z == target_point.z);
                 }
             }
         }

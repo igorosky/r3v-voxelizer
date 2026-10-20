@@ -631,18 +631,6 @@ mod test {
     }
 
     impl WgpuAccelerated {
-        fn set_voxels(&mut self, voxels: &[(i32, i32, i32, u32)]) {
-            let input: Vec<[u32; 4]> = voxels
-                .iter()
-                .map(|&(x, y, z, value)| [x as u32, y as u32, z as u32, value])
-                .collect();
-            self.upload_input(&input);
-            self.write_params([0.0; 3], input.len() as u32, 0);
-            let mut encoder = self.encoder();
-            self.dispatch(&mut encoder, Kernel::SetVoxels, input.len() as u32);
-            self.queue.submit([encoder.finish()]);
-        }
-
         /// Whole `buffer`, read back as words.
         fn words_of(&self, buffer: &wgpu::Buffer) -> Vec<u32> {
             bytemuck::pod_collect_to_vec(&pollster::block_on(self.read_back(
@@ -726,6 +714,18 @@ mod test {
         }
         fn set_voxel(&mut self, x: i32, y: i32, z: i32, value: u32) {
             self.set_voxels(&[(x, y, z, value)]);
+        }
+        // One dispatch for all of them
+        fn set_voxels(&mut self, voxels: &[(i32, i32, i32, u32)]) {
+            let input: Vec<[u32; 4]> = voxels
+                .iter()
+                .map(|&(x, y, z, value)| [x as u32, y as u32, z as u32, value])
+                .collect();
+            self.upload_input(&input);
+            self.write_params([0.0; 3], input.len() as u32, 0);
+            let mut encoder = self.encoder();
+            self.dispatch(&mut encoder, Kernel::SetVoxels, input.len() as u32);
+            self.queue.submit([encoder.finish()]);
         }
         fn pages(&self) -> Vec<(Coord, [u32; PAGE_LEN])> {
             let mut out: Vec<_> = self
