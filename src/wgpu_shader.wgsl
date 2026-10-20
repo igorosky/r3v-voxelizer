@@ -332,7 +332,8 @@ fn closest_boundary(dir: vec3i, position: vec3f, ray: vec3f) -> vec3f {
 }
 
 // `t_max` of an axis that reached the target, finite since shaders may assume there are no infinities
-const T_MAX_REACHED: f32 = 3.40282347e38;
+// f32::MAX written exactly: a rounded decimal (3.40282347e38) lies above it, which Tint rejects
+const T_MAX_REACHED: f32 = 0x1.fffffep+127f;
 
 // `t_max` of an axis after a step along it
 // An axis that reached the target is never stepped again: when the point lies on boundaries of several axes
