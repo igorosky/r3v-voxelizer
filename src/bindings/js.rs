@@ -1,6 +1,18 @@
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::{PointF, PointI};
+use crate::{Multipliers, PointF, PointI};
+
+#[wasm_bindgen]
+impl Multipliers {
+    #[wasm_bindgen(constructor)]
+    pub fn new(intensity: f32, hit: u32, target: u32) -> Self {
+        Self {
+            intensity,
+            hit,
+            target,
+        }
+    }
+}
 
 #[wasm_bindgen]
 impl PointF {
@@ -53,7 +65,7 @@ fn points_from_js(value: &wasm_bindgen::JsValue) -> Result<Vec<PointF>, wasm_bin
 mod st {
     use super::points_from_js;
     use crate::Voxelizer;
-    use crate::{PointF, PointI};
+    use crate::{Multipliers, PointF, PointI};
     use wasm_bindgen::prelude::wasm_bindgen;
     use wasm_bindgen::{JsError, JsValue};
 
@@ -76,9 +88,11 @@ mod st {
         ) -> Self {
             Self(crate::SingleThreaded::new(crate::VoxelizerParams {
                 resolution,
-                intensity_multiplier,
-                hit_multiplier,
-                target_multiplier,
+                multipliers: Multipliers {
+                    intensity: intensity_multiplier,
+                    hit: hit_multiplier,
+                    target: target_multiplier,
+                },
                 destroy_threshold,
                 construct_threshold,
                 max_value,
@@ -94,6 +108,15 @@ mod st {
                 .0
                 .add_points(sensor_pos.clone(), points_from_js(&points)?.as_slice()))
         }
+        /// Multipliers used by the following `add_points` calls, voxels keep
+        /// the values they got so far.
+        pub fn set_multipliers(&mut self, multipliers: &Multipliers) {
+            self.0.set_multipliers(*multipliers);
+        }
+        /// Copy of the multipliers used by `add_points`.
+        pub fn get_multipliers(&self) -> Multipliers {
+            self.0.multipliers()
+        }
     }
 }
 
@@ -102,7 +125,8 @@ mod gpu {
     use std::cell::Cell;
 
     use super::points_from_js;
-    use crate::{PointF, PointI};
+    use crate::Voxelizer;
+    use crate::{Multipliers, PointF, PointI};
     use wasm_bindgen::prelude::wasm_bindgen;
     use wasm_bindgen::{JsError, JsValue};
 
@@ -136,9 +160,11 @@ mod gpu {
             crate::WgpuAccelerated::new(
                 crate::VoxelizerParams {
                     resolution,
-                    intensity_multiplier,
-                    hit_multiplier,
-                    target_multiplier,
+                    multipliers: Multipliers {
+                        intensity: intensity_multiplier,
+                        hit: hit_multiplier,
+                        target: target_multiplier,
+                    },
                     destroy_threshold,
                     construct_threshold,
                     max_value,
@@ -171,6 +197,26 @@ mod gpu {
                 .await;
             self.0.set(Some(voxelizer));
             Ok(update)
+        }
+        /// Multipliers used by the following `add_points` calls, voxels keep
+        /// the values they got so far. Throws while `add_points` is running.
+        pub fn set_multipliers(&self, multipliers: &Multipliers) -> Result<(), JsError> {
+            let mut voxelizer = self.0.take().ok_or_else(|| {
+                JsError::new("add_points is still running, it has to finish before set_multipliers")
+            })?;
+            voxelizer.set_multipliers(*multipliers);
+            self.0.set(Some(voxelizer));
+            Ok(())
+        }
+        /// Copy of the multipliers used by `add_points`. Throws while
+        /// `add_points` is running.
+        pub fn get_multipliers(&self) -> Result<Multipliers, JsError> {
+            let voxelizer = self.0.take().ok_or_else(|| {
+                JsError::new("add_points is still running, it has to finish before get_multipliers")
+            })?;
+            let multipliers = voxelizer.multipliers();
+            self.0.set(Some(voxelizer));
+            Ok(multipliers)
         }
         /// GPU memory taken by the hashmap of `bucket_count` buckets, in
         /// bytes. Exact as a number, it stays below 2 ** 53.

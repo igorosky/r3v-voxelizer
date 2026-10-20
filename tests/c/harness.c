@@ -112,6 +112,12 @@ PointI pi(int32_t x, int32_t y, int32_t z, uint32_t i)
     return p;
 }
 
+Multipliers mult(float intensity, uint32_t hit, uint32_t target)
+{
+    Multipliers m = {intensity, hit, target};
+    return m;
+}
+
 void *make_full(const Impl *impl, float resolution, float intensity_multiplier,
                 uint32_t hit_multiplier, uint32_t target_multiplier, uint32_t destroy_threshold,
                 uint32_t construct_threshold, uint32_t max_value, bool compress)

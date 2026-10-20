@@ -5,7 +5,7 @@ use rayon::{
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    Voxelizer, VoxelizerParams,
+    Multipliers, Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -29,9 +29,7 @@ pub struct MultiThreaded {
     // Pages a voxel of which got zeroed during the current call
     maybe_empty: DashSet<ThreeDim>,
     resolution: f32,
-    intensity_multiplier: f32,
-    hit_multiplier: u32,
-    target_multiplier: u32,
+    multipliers: Multipliers,
     destroy_threshold: u32,
     construct_threshold: u32,
     max_value: u32,
@@ -44,9 +42,7 @@ impl MultiThreaded {
     pub fn new(params: VoxelizerParams, thread_count: usize) -> Result<Self, ThreadPoolBuildError> {
         let VoxelizerParams {
             resolution,
-            intensity_multiplier,
-            hit_multiplier,
-            target_multiplier,
+            multipliers,
             destroy_threshold,
             construct_threshold,
             max_value,
@@ -62,9 +58,7 @@ impl MultiThreaded {
             result: DashMap::default(),
             maybe_empty: DashSet::default(),
             resolution,
-            intensity_multiplier,
-            hit_multiplier,
-            target_multiplier,
+            multipliers,
             destroy_threshold,
             construct_threshold,
             max_value,
@@ -88,7 +82,7 @@ impl Voxelizer for MultiThreaded {
                 .par_iter()
                 .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
             let resolution = self.resolution;
-            let intensity_multiplier = self.intensity_multiplier;
+            let intensity_multiplier = self.multipliers.intensity;
             points
                 .par_iter()
                 .map(move |v| v / resolution)
@@ -185,6 +179,14 @@ impl Voxelizer for MultiThreaded {
         });
         self.remove_emptied(emptied_compressed);
         result
+    }
+    #[inline]
+    fn set_multipliers(&mut self, multipliers: Multipliers) {
+        self.multipliers = multipliers;
+    }
+    #[inline]
+    fn multipliers(&self) -> Multipliers {
+        self.multipliers
     }
 }
 
@@ -289,7 +291,7 @@ impl MultiThreaded {
         let mut entry = self.voxels.entry(idx.0).or_insert_with(|| [0; _]);
         self.result.entry(idx).or_insert(entry[idx.1]);
         entry[idx.1] = entry[idx.1]
-            .saturating_add(point.i * self.target_multiplier)
+            .saturating_add(point.i * self.multipliers.target)
             .min(self.max_value);
     }
     fn ray_march(&self, mut sensor_pos: PointI, sensor_pos_divided: &PointF, mut point: PointF) {
@@ -301,7 +303,7 @@ impl MultiThreaded {
             x: point.x.floor() as i32,
             y: point.y.floor() as i32,
             z: point.z.floor() as i32,
-            i: (point.i * self.intensity_multiplier) as u32 * self.hit_multiplier,
+            i: (point.i * self.multipliers.intensity) as u32 * self.multipliers.hit,
         };
         let dir_x = (target_point.x - sensor_pos.x).signum();
         let dir_y = (target_point.y - sensor_pos.y).signum();
@@ -425,12 +427,12 @@ mod test {
         MultiThreaded, PAGE_SIZE,
     };
     use crate::{
-        Voxelizer, VoxelizerParams,
+        Multipliers, Voxelizer, VoxelizerParams,
         geometry::PointI,
         test::{
-            Coord, PAGE_LEN, PLAIN, PagedIndex, SCENARIO_PARAMS, TestVoxelizer, assert_snapshot_eq,
-            compressed_bits, compressed_word, cube_faces, get_voxel, nonzero_voxels, page_bit, pf,
-            pi, scenario, seed, sorted, with_i,
+            Coord, PAGE_LEN, PLAIN, PagedIndex, SCENARIO_PARAMS, SWITCHED, TestVoxelizer,
+            assert_snapshot_eq, compressed_bits, compressed_word, cube_faces, get_voxel,
+            nonzero_voxels, page_bit, pf, pi, scenario_with, seed, sorted, with_i,
         },
     };
 
@@ -450,9 +452,11 @@ mod test {
         MultiThreaded::new(
             VoxelizerParams {
                 resolution,
-                intensity_multiplier: 1.0,
-                hit_multiplier,
-                target_multiplier,
+                multipliers: Multipliers {
+                    intensity: 1.0,
+                    hit: hit_multiplier,
+                    target: target_multiplier,
+                },
                 destroy_threshold,
                 construct_threshold,
                 max_value: u32::MAX,
@@ -512,9 +516,11 @@ mod test {
     fn new_stores_parameters() {
         let params = VoxelizerParams {
             resolution: 0.5,
-            intensity_multiplier: 0.25,
-            hit_multiplier: 2,
-            target_multiplier: 3,
+            multipliers: Multipliers {
+                intensity: 0.25,
+                hit: 2,
+                target: 3,
+            },
             destroy_threshold: 4,
             construct_threshold: 5,
             max_value: 6,
@@ -522,9 +528,14 @@ mod test {
         };
         let v = MultiThreaded::new(params, 3).expect("thread pool must build");
         assert_eq!(v.resolution, 0.5);
-        assert_eq!(v.intensity_multiplier, 0.25);
-        assert_eq!(v.hit_multiplier, 2);
-        assert_eq!(v.target_multiplier, 3);
+        assert_eq!(
+            v.multipliers,
+            Multipliers {
+                intensity: 0.25,
+                hit: 2,
+                target: 3,
+            }
+        );
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
         assert_eq!(v.max_value, 6);
@@ -554,12 +565,18 @@ mod test {
     fn same_result_for_any_thread_count() {
         let make =
             |params, threads| MultiThreaded::new(params, threads).expect("thread pool must build");
-        for params in SCENARIO_PARAMS {
-            let expected = scenario(make(params, 1));
-            assert!(expected.results.iter().all(|r| !r.is_empty()));
-            for threads in [2, 4, 8, 16] {
-                let got = scenario(make(params, threads));
-                assert_snapshot_eq(&got, &expected, &format!("{params:?}, threads = {threads}"));
+        for switch in [None, Some(SWITCHED)] {
+            for params in SCENARIO_PARAMS {
+                let expected = scenario_with(make(params, 1), switch);
+                assert!(expected.results.iter().all(|r| !r.is_empty()));
+                for threads in [2, 4, 8, 16] {
+                    let got = scenario_with(make(params, threads), switch);
+                    assert_snapshot_eq(
+                        &got,
+                        &expected,
+                        &format!("{params:?}, switch = {switch:?}, threads = {threads}"),
+                    );
+                }
             }
         }
     }

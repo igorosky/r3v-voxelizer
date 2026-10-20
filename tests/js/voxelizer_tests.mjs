@@ -28,7 +28,7 @@ const U32_MAX = 2 ** 32 - 1;
 
 /** Names of the classes the module must have with the enabled features. */
 function enabledClasses() {
-    return ["PointF", "PointI", ...Object.entries(CLASS_OF_FEATURE)
+    return ["Multipliers", "PointF", "PointI", ...Object.entries(CLASS_OF_FEATURE)
         .filter(([feature]) => FEATURES.has(feature))
         .map(([, cls]) => cls)];
 }
@@ -96,6 +96,44 @@ function point_i_setter_wraps() {
     point.y = 1.9;
     point.i = -1;
     checkCoords(point, [-(2 ** 31), 1, 0, U32_MAX], "PointI after setting out of range values");
+}
+
+/** [intensity, hit, target] of a Multipliers, read through its properties. */
+function multiplierValues(multipliers) {
+    return [multipliers.intensity, multipliers.hit, multipliers.target];
+}
+
+/** Fails unless multipliers holds the expected values. */
+function checkMultipliers(multipliers, expected, what) {
+    const got = multiplierValues(multipliers);
+    check(same(got, expected), `${what}: holds ${fmt(got)}, expected ${fmt(expected)}`);
+}
+
+function multipliers_constructor() {
+    const multipliers = new rv.Multipliers(2.5, 2, 3);
+    check(multipliers instanceof rv.Multipliers);
+    checkMultipliers(multipliers, [2.5, 2, 3], "new Multipliers(2.5, 2, 3)");
+    // The intensity is an f32.
+    checkMultipliers(new rv.Multipliers(0.1, 0, U32_MAX), [Math.fround(0.1), 0, U32_MAX],
+        `new Multipliers(0.1, 0, ${U32_MAX})`);
+}
+
+function multipliers_properties_writable() {
+    const multipliers = new rv.Multipliers(1.0, 1, 1);
+    multipliers.intensity = -1.5;
+    multipliers.hit = U32_MAX;
+    multipliers.target = 0;
+    checkMultipliers(multipliers, [-1.5, U32_MAX, 0], "Multipliers after setting its properties");
+}
+
+function multipliers_setter_wraps() {
+    // Out of range values wrap like any wasm-bindgen integer (see the README).
+    const multipliers = new rv.Multipliers(1.0, 1, 1);
+    multipliers.hit = -1;
+    multipliers.target = 2 ** 32 + 3.9;
+    checkMultipliers(multipliers, [1, U32_MAX, 3], "Multipliers after setting out of range values");
+    checkMultipliers(new rv.Multipliers(1.0, -1, 1.9), [1, U32_MAX, 1],
+        "new Multipliers(1, -1, 1.9)");
 }
 
 async function constructors_accept_u32_max(impl) {
@@ -728,6 +766,103 @@ async function intensity_multiplier_scales_hit_and_target(impl) {
     await expectVoxels(fromAbove(v, 5, 0, 0, 0.5), pi(5, 0, 0, 1 * 3));
 }
 
+// ------------------------------------------------------ set multipliers
+
+async function get_multipliers_returns_constructor_values(impl) {
+    const multipliers = (await plain(impl)).get_multipliers();
+    check(multipliers instanceof rv.Multipliers, "get_multipliers did not return Multipliers");
+    checkMultipliers(multipliers, [1, 1, 1], "get_multipliers of plain");
+    const v = await make(impl, 1.0, 2, 3, 0, 1, false, U32_MAX, 2.5);
+    checkMultipliers(v.get_multipliers(), [2.5, 2, 3], "get_multipliers after creating with them");
+}
+
+async function get_multipliers_returns_set_values(impl) {
+    const v = await plain(impl);
+    for (const values of [[2.5, 2, 3], [0, 0, 0], [-1.5, U32_MAX, U32_MAX], [1, 1, 1]]) {
+        v.set_multipliers(new rv.Multipliers(...values));
+        checkMultipliers(v.get_multipliers(), values, `get_multipliers after setting ${fmt(values)}`);
+    }
+    // The last of several sets wins, adding points leaves it as it is.
+    v.set_multipliers(new rv.Multipliers(2.5, 2, 3));
+    v.set_multipliers(new rv.Multipliers(1.5, 2, 3));
+    await addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0));
+    checkMultipliers(v.get_multipliers(), [1.5, 2, 3], "get_multipliers after add_points");
+}
+
+async function get_multipliers_returns_copy(impl) {
+    const v = await plain(impl);
+    const multipliers = new rv.Multipliers(2.5, 2, 3);
+    v.set_multipliers(multipliers);
+    // Changing the object passed in or the one returned leaves the voxelizer
+    // as it was.
+    multipliers.hit = 100;
+    v.get_multipliers().target = 100;
+    checkMultipliers(v.get_multipliers(), [2.5, 2, 3], "get_multipliers after changing copies");
+    checkMultipliers(multipliers, [2.5, 100, 3], "Multipliers passed to set_multipliers");
+}
+
+async function set_multipliers_applies_to_next_call(impl) {
+    const v = await plain(impl);
+    await seed(v, 1.0, 0, 0, 0, 20.0);
+    await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 3.0)),
+        pi(0, 0, 0, 17), pi(3, 0, 0, 3));
+    v.set_multipliers(new rv.Multipliers(2.5, 2, 3));
+    // Math.trunc(3 * 2.5) = 7, times 2 subtracted from and times 3 added to
+    // what the voxels hold already.
+    await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 3.0)),
+        pi(0, 0, 0, 17 - 7 * 2), pi(3, 0, 0, 3 + 7 * 3));
+    // Setting the old ones back restores the old behaviour.
+    v.set_multipliers(new rv.Multipliers(1.0, 1, 1));
+    await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 3.0)),
+        pi(0, 0, 0, 0), pi(3, 0, 0, 24 + 3));
+}
+
+async function set_multipliers_leaves_input_usable(impl) {
+    // The caller keeps owning the Multipliers it passes, so it can be passed
+    // again.
+    const a = await plain(impl);
+    const b = await plain(impl);
+    const multipliers = new rv.Multipliers(2.5, 2, 3);
+    a.set_multipliers(multipliers);
+    b.set_multipliers(multipliers);
+    checkMultipliers(multipliers, [2.5, 2, 3], "Multipliers after set_multipliers");
+    checkMultipliers(b.get_multipliers(), [2.5, 2, 3], "get_multipliers of the second voxelizer");
+    multipliers.free();
+    checkMultipliers(a.get_multipliers(), [2.5, 2, 3], "get_multipliers after freeing the input");
+}
+
+async function set_multipliers_rejects_bad_argument(impl) {
+    const v = await plain(impl);
+    const freed = new rv.Multipliers(2.5, 2, 3);
+    freed.free();
+    const bad = [
+        ["null", null],
+        ["undefined", undefined],
+        ["a plain object", { intensity: 2.5, hit: 2, target: 3 }],
+        ["a PointF", pf(2.5, 2.0, 3.0, 0.0)],
+        ["a freed Multipliers", freed],
+    ];
+    for (const [what, multipliers] of bad) {
+        await throwsError(() => v.set_multipliers(multipliers), `set_multipliers with ${what}`);
+    }
+    checkMultipliers(v.get_multipliers(), [1, 1, 1], "get_multipliers after the rejected calls");
+    await expectUntouched(v);
+}
+
+async function set_multipliers_same_as_constructed(impl) {
+    for (const [destroy, construct, compress] of SCENARIO_PARAMS) {
+        for (const [intensity, hit, target] of [[1.5, 2, 3], [0.5, 1, 4]]) {
+            const v = await make(impl, 1.0, 1, 1, destroy, construct, compress);
+            v.set_multipliers(new rv.Multipliers(intensity, hit, target));
+            const a = await scenario(v);
+            const b = await scenario(await make(impl, 1.0, hit, target, destroy, construct,
+                compress, U32_MAX, intensity));
+            check(same(a, b), `compress = ${compress}, set to ${fmt([intensity, hit, target])}: `
+                + "runs differ");
+        }
+    }
+}
+
 // ------------------------------------------------------------ scenario
 
 async function scenario_repeatable(impl) {
@@ -786,6 +921,24 @@ async function wgpu_overlapping_add_points_rejects() {
     await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0)), pi(3, 0, 0, 2));
 }
 
+async function wgpu_multipliers_while_running_rejects() {
+    // A call holds the voxelizer until it resolves, setting or reading the
+    // multipliers meanwhile throws and changes nothing.
+    const v = await make(WGPU, 1.0, 2, 3, 0, 1, false, U32_MAX, 2.5);
+    const first = addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0));
+    // Async calls start from a microtask, this lets the first one take the
+    // voxelizer.
+    await null;
+    const multipliers = new rv.Multipliers(1.0, 1, 1);
+    await throwsError(() => v.set_multipliers(multipliers), "set_multipliers while add_points runs");
+    await throwsError(() => v.get_multipliers(), "get_multipliers while add_points runs");
+    // Math.trunc(1 * 2.5) = 2, times 3.
+    await expectVoxels(first, pi(3, 0, 0, 6));
+    checkMultipliers(v.get_multipliers(), [2.5, 2, 3], "get_multipliers after the call");
+    v.set_multipliers(multipliers);
+    await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0)), pi(3, 0, 0, 7));
+}
+
 function compress_helpers_self_check() {
     check(blockBit(3, 3, 1) === 2 ** 31);
     check(blockBit(3, 3, 3) === 2 ** 31);
@@ -815,6 +968,9 @@ const TEST_CASES = [
     once(point_i_constructor),
     once(point_i_properties_writable),
     once(point_i_setter_wraps),
+    once(multipliers_constructor),
+    once(multipliers_properties_writable),
+    once(multipliers_setter_wraps),
     perImpl(constructors_accept_u32_max),
     perImpl(constructors_wrap_out_of_range),
     perImpl(add_points_result_types),
@@ -881,12 +1037,20 @@ const TEST_CASES = [
     perImpl(compress_mask_accumulates_across_calls),
     perImpl(max_value_caps_target),
     perImpl(intensity_multiplier_scales_hit_and_target),
+    perImpl(get_multipliers_returns_constructor_values),
+    perImpl(get_multipliers_returns_set_values),
+    perImpl(get_multipliers_returns_copy),
+    perImpl(set_multipliers_applies_to_next_call),
+    perImpl(set_multipliers_leaves_input_usable),
+    perImpl(set_multipliers_rejects_bad_argument),
+    perImpl(set_multipliers_same_as_constructed),
     perImpl(scenario_repeatable),
     once(single_and_wgpu_agree, "single_threaded", "wgpu"),
     once(wgpu_create_is_async, "wgpu"),
     once(wgpu_rejects_zero_buckets, "wgpu"),
     once(wgpu_memory_size_grows, "wgpu"),
     once(wgpu_overlapping_add_points_rejects, "wgpu"),
+    once(wgpu_multipliers_while_running_rejects, "wgpu"),
     once(compress_helpers_self_check),
 ];
 

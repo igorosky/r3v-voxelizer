@@ -39,16 +39,18 @@ use r3v_voxelizer::MultiThreaded;
 use r3v_voxelizer::SingleThreaded;
 #[cfg(feature = "wgpu")]
 use r3v_voxelizer::WgpuAccelerated;
-use r3v_voxelizer::{Voxelizer, VoxelizerParams, geometry::PointF};
+use r3v_voxelizer::{Multipliers, Voxelizer, VoxelizerParams, geometry::PointF};
 
 /// Size of a voxel. Workloads are generated in voxels and scaled by it.
 const RESOLUTION: f32 = 0.1;
 /// `compress` is set by every run.
 const PARAMS: VoxelizerParams = VoxelizerParams {
     resolution: RESOLUTION,
-    intensity_multiplier: 1.0,
-    hit_multiplier: 1,
-    target_multiplier: 4,
+    multipliers: Multipliers {
+        intensity: 1.0,
+        hit: 1,
+        target: 4,
+    },
     destroy_threshold: 2,
     construct_threshold: 8,
     max_value: 64,
@@ -636,16 +638,15 @@ fn main() {
     );
     let VoxelizerParams {
         resolution,
-        hit_multiplier,
-        target_multiplier,
+        multipliers: Multipliers { hit, target, .. },
         destroy_threshold,
         construct_threshold,
         max_value,
         ..
     } = PARAMS;
     println!(
-        "params:          resolution {resolution}, hit {hit_multiplier}, target \
-         {target_multiplier}, destroy {destroy_threshold}, construct {construct_threshold}, \
+        "params:          resolution {resolution}, hit {hit}, target {target}, \
+         destroy {destroy_threshold}, construct {construct_threshold}, \
          max value {max_value}, intensities 1..={MAX_INTENSITY}"
     );
     println!("match:           whether a run returned the same voxels as the ref run");

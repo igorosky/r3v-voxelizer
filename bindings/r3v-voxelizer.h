@@ -25,6 +25,29 @@ typedef struct PointF {
   float i;
 } PointF;
 
+/**
+ * Scale the intensities points add to and subtract from voxels. A point of
+ * intensity `i` adds `trunc(i * intensity) * target` to the voxel it ends in
+ * and subtracts `trunc(i * intensity) * hit` from every voxel its ray passes
+ * through.
+ */
+typedef struct Multipliers {
+  /**
+   * Scales the intensity of every point before it is truncated to an
+   * integer and multiplied by `hit` or `target`. `1.0` leaves intensities
+   * as they are.
+   */
+  float intensity;
+  /**
+   * Scales the intensity subtracted from voxels a ray passes through.
+   */
+  uint32_t hit;
+  /**
+   * Scales the intensity added to the voxel a ray ends in.
+   */
+  uint32_t target;
+} Multipliers;
+
 void *create_single_threaded_voxelizer(float _resolution,
                                        float _intensity_multiplier,
                                        uint32_t _hit_multiplier,
@@ -69,6 +92,19 @@ struct VoxelsUpdate add_points(void *voxelizer,
                                struct PointF sensor_pos,
                                const struct PointF *points,
                                uintptr_t count);
+
+/**
+ * Multipliers used by the following `add_points` calls of `voxelizer`.
+ * Voxels keep the values they got so far. Does nothing when `voxelizer` is
+ * NULL.
+ */
+void set_multipliers(void *voxelizer, struct Multipliers multipliers);
+
+/**
+ * Multipliers used by `add_points` of `voxelizer`. All 0 when `voxelizer`
+ * is NULL.
+ */
+struct Multipliers get_multipliers(const void *voxelizer);
 
 void drop_update(struct VoxelsUpdate update);
 
