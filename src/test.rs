@@ -12,8 +12,6 @@
     feature = "wgpu"
 ))]
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
 use crate::{
     Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
@@ -269,17 +267,23 @@ pub(crate) fn along_x<T: TestVoxelizer>(
 // A deterministic, schedule independent workload used to compare
 // implementations and thread counts.
 
-/// Parameters [`scenario`] is meant to run with. With compression
-/// `destroy = construct - 1`, so a voxel above the destroy threshold has
-/// always been constructed and the destroy path never meets a missing
-/// compressed page. The caps are below the intensities of call 1, whose
-/// targets call 2 hits. The intensities are integers, so scaling them by
-/// 1.5 truncates the odd ones.
-pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 5] = [
+/// Parameters [`scenario`] is meant to run with. The second compressed set
+/// leaves a gap between the thresholds: call 1 targets of intensity 3 stay
+/// in it without being constructed and call 2 hits drop both them and
+/// constructed ones below the destroy threshold. The caps are below the
+/// intensities of call 1, whose targets call 2 hits. The intensities are
+/// integers, so scaling them by 1.5 truncates the odd ones.
+pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 6] = [
     PLAIN,
     VoxelizerParams {
         destroy_threshold: 2,
         construct_threshold: 3,
+        compress: true,
+        ..PLAIN
+    },
+    VoxelizerParams {
+        destroy_threshold: 2,
+        construct_threshold: 4,
         compress: true,
         ..PLAIN
     },
@@ -453,7 +457,9 @@ macro_rules! shared_tests {
             compress_mask_accumulates_across_calls,
             compress_result_map_cleared_after_call,
             compress_false_leaves_none,
-            compress_destroy_without_construct_panics,
+            compress_destroy_without_construct_ignored,
+            compress_destroy_without_construct_keeps_other_bits,
+            compress_reconstruct_without_destroy_not_reported,
             max_value_caps_target,
             max_value_caps_within_one_call,
             max_value_voxel_not_permanent,
@@ -1396,22 +1402,55 @@ pub(crate) fn compress_false_leaves_none<T: TestVoxelizer>() {
     assert!(v.compressed_pages().is_none());
 }
 
-pub(crate) fn compress_destroy_without_construct_panics<T: TestVoxelizer>() {
-    // Construct threshold high enough that the target does not create the
-    // compressed page, so the destroy of the seeded voxel finds nothing.
+pub(crate) fn compress_destroy_without_construct_ignored<T: TestVoxelizer>() {
+    // Between the thresholds a voxel is not constructed, so dropping to the
+    // destroy threshold from there destroys nothing.
     let mut v = T::make(1.0, 1, 1, 0, 10, true);
-    v.set_voxel(0, 0, 0, 5);
-    let err = catch_unwind(AssertUnwindSafe(|| along_x(&mut v, 0, 3, 0, 0, 5.0)))
-        .expect_err("destroying a voxel that was never constructed must panic");
-    let msg = err
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| err.downcast_ref::<&str>().copied())
-        .unwrap_or("");
-    assert!(
-        msg.contains("It must have existed"),
-        "unexpected panic message: {msg:?}"
+    assert!(along_x(&mut v, 0, 3, 0, 0, 5.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(5));
+    // 5 -> 0 crosses the destroy threshold, (7,0,0) -> 5 stays below the
+    // construct one.
+    assert!(along_x(&mut v, 0, 7, 0, 0, 5.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), None);
+    assert_eq!(get_voxel(&v, 7, 0, 0), Some(5));
+    assert!(v.compressed_pages().unwrap().is_empty());
+    assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn compress_destroy_without_construct_keeps_other_bits<T: TestVoxelizer>() {
+    // Same, with a constructed voxel in the same page: its bit stays the
+    // only one.
+    let mut v = T::make(1.0, 1, 1, 0, 10, true);
+    assert!(along_x(&mut v, 0, 3, 0, 0, 5.0).is_empty());
+    assert_eq!(
+        along_x(&mut v, 0, 3, 1, 0, 10.0),
+        vec![block(3, 1, 0, block_bit(3, 1, 0))]
     );
+    assert!(along_x(&mut v, 0, 7, 0, 0, 5.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(0));
+    assert_eq!(compressed_word(&v, 3, 0, 0), Some(page_bit(3, 1, 0)));
+    assert_eq!(compressed_bits(&v), vec![pi(3, 1, 0, 1)]);
+}
+
+pub(crate) fn compress_reconstruct_without_destroy_not_reported<T: TestVoxelizer>() {
+    let mut v = T::make(1.0, 1, 1, 2, 5, true);
+    assert_eq!(
+        along_x(&mut v, 0, 3, 0, 0, 5.0),
+        vec![block(3, 0, 0, block_bit(3, 0, 0))]
+    );
+    // 5 -> 3 stays above the destroy threshold, so it stays constructed.
+    assert!(along_x(&mut v, 0, 7, 0, 0, 2.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(3));
+    // 3 -> 5 crosses the construct threshold, but it is constructed already.
+    assert!(along_x(&mut v, 0, 3, 0, 0, 2.0).is_empty());
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(5));
+    assert_eq!(compressed_bits(&v), vec![pi(3, 0, 0, 1)]);
+    // 5 -> 2 destroys it, (7,0,0) 2 -> 5 gets constructed.
+    assert_eq!(
+        sorted(along_x(&mut v, 0, 7, 0, 0, 3.0)),
+        sorted(vec![block(3, 0, 0, 0), block(7, 0, 0, block_bit(7, 0, 0))])
+    );
+    assert_eq!(compressed_bits(&v), vec![pi(7, 0, 0, 1)]);
 }
 
 // --------------------------------------------------------------- max value
