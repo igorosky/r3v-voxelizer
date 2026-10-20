@@ -1,4 +1,4 @@
-use hashbrown::{HashMap, HashSet};
+use rustc_hash::FxBuildHasher;
 
 use crate::{
     Voxelizer, VoxelizerParams,
@@ -11,6 +11,8 @@ const PAGE_SIZE: u32 = 4096;
 const BITS_FOR_COMPRESSED_ZORDER: u32 = PAGE_SIZE.highest_one().unwrap() / 3;
 const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = 2_i32.pow(BITS_FOR_COMPRESSED_ZORDER) - 1;
 
+type HashMap<K, V> = hashbrown::HashMap<K, V, FxBuildHasher>;
+type HashSet<K> = hashbrown::HashSet<K, FxBuildHasher>;
 type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
 
@@ -46,10 +48,14 @@ impl SingleThreaded {
             compress,
         } = params;
         Self {
-            voxels: HashMap::new(),
-            compressed_voxels: if compress { Some(HashMap::new()) } else { None },
-            result: HashMap::new(),
-            maybe_empty: HashSet::new(),
+            voxels: HashMap::default(),
+            compressed_voxels: if compress {
+                Some(HashMap::default())
+            } else {
+                None
+            },
+            result: HashMap::default(),
+            maybe_empty: HashSet::default(),
             resolution,
             intensity_multiplier,
             hit_multiplier,
@@ -89,7 +95,7 @@ impl Voxelizer for SingleThreaded {
         let mut result = Vec::new();
         // Compressed pages a word of which got zeroed
         let mut emptied_compressed = Vec::new();
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         std::mem::swap(&mut map, &mut self.result);
         let iter = map
             .drain()
@@ -104,7 +110,7 @@ impl Voxelizer for SingleThreaded {
             })
             .filter(|(_, prev, voxel)| voxel != prev);
         if let Some(compressed_voxels) = self.compressed_voxels.as_mut() {
-            let mut compressed_dedup = HashMap::new();
+            let mut compressed_dedup = HashMap::default();
             for (idx, prev, voxel) in iter {
                 let [x, y, z] = self.zorder.coord_of(idx.1 as u64);
                 let idx2 = || {

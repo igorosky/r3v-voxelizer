@@ -1,8 +1,8 @@
-use dashmap::{DashMap, DashSet};
 use rayon::{
     ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
     iter::{IntoParallelRefIterator, ParallelBridge, ParallelIterator},
 };
+use rustc_hash::FxBuildHasher;
 
 use crate::{
     Voxelizer, VoxelizerParams,
@@ -15,6 +15,8 @@ const PAGE_SIZE: u32 = 4096;
 const BITS_FOR_COMPRESSED_ZORDER: u32 = PAGE_SIZE.highest_one().unwrap() / 3;
 const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = 2_i32.pow(BITS_FOR_COMPRESSED_ZORDER) - 1;
 
+type DashMap<K, V> = dashmap::DashMap<K, V, FxBuildHasher>;
+type DashSet<K> = dashmap::DashSet<K, FxBuildHasher>;
 type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
 
@@ -51,10 +53,14 @@ impl MultiThreaded {
             compress,
         } = params;
         Ok(Self {
-            voxels: DashMap::new(),
-            compressed_voxels: if compress { Some(DashMap::new()) } else { None },
-            result: DashMap::new(),
-            maybe_empty: DashSet::new(),
+            voxels: DashMap::default(),
+            compressed_voxels: if compress {
+                Some(DashMap::default())
+            } else {
+                None
+            },
+            result: DashMap::default(),
+            maybe_empty: DashSet::default(),
             resolution,
             intensity_multiplier,
             hit_multiplier,
@@ -94,9 +100,9 @@ impl Voxelizer for MultiThreaded {
                 })
                 .for_each(|point| self.add_voxel(&point));
         });
-        let map = std::mem::replace(&mut self.result, DashMap::new());
+        let map = std::mem::take(&mut self.result);
         // Compressed pages a word of which got zeroed
-        let emptied_compressed = DashSet::new();
+        let emptied_compressed = DashSet::default();
         let result = self.thread_pool.install(|| {
             let iter = map
                 .into_iter()
@@ -112,7 +118,7 @@ impl Voxelizer for MultiThreaded {
                 })
                 .filter(|(_, prev, voxel)| voxel != prev);
             if let Some(compressed_voxels) = self.compressed_voxels.as_ref() {
-                let compressed_dedup = DashMap::new();
+                let compressed_dedup = DashMap::default();
                 iter.for_each(|(idx, prev, voxel)| {
                     let [x, y, z] = self.zorder.coord_of(idx.1 as u64);
                     let idx2 = || {
