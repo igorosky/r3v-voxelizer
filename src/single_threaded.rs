@@ -214,6 +214,15 @@ impl SingleThreaded {
         debug_assert!(result >= 0.0);
         result
     }
+    /// `max_[xyz]` of an axis after a step along it. An axis that reached the
+    /// target is never stepped again: when the point lies on boundaries of
+    /// several axes (or due to float errors) its next crossing can tie with
+    /// the last one of another axis, and stepping it would walk past the
+    /// target.
+    #[inline]
+    fn next_boundary(max: f32, delta: f32, reached: bool) -> f32 {
+        if reached { f32::INFINITY } else { max + delta }
+    }
     #[inline]
     fn hit_voxel(&mut self, point: &PointI) {
         let idx = self.get_index(point);
@@ -300,6 +309,12 @@ impl SingleThreaded {
         let dir_z = (target_point.z - sensor_pos.z).signum();
         sensor_pos.i = target_point.i;
         point -= sensor_pos_divided;
+        // Every step moves exactly one voxel towards the target, so this is
+        // the exact step count. Used instead of `target_point != sensor_pos`
+        // so float errors can't cause an infinite loop
+        let steps = (target_point.x - sensor_pos.x).abs()
+            + (target_point.y - sensor_pos.y).abs()
+            + (target_point.z - sensor_pos.z).abs();
         use std::cmp::Ordering;
         match (dir_x.cmp(&0), dir_y.cmp(&0), dir_z.cmp(&0)) {
             (Ordering::Equal, Ordering::Equal, Ordering::Equal) => (),
@@ -326,16 +341,16 @@ impl SingleThreaded {
                 let dy = 1.0 / point.y.abs();
                 let mut max_x = Self::closest_boundary(x.is_gt(), sensor_pos_divided.x, point.x);
                 let mut max_y = Self::closest_boundary(y.is_gt(), sensor_pos_divided.y, point.y);
-                while target_point != sensor_pos {
-                    debug_assert!(max_x < 1.0 + dx);
-                    debug_assert!(max_y < 1.0 + dy);
+                for _ in 0..steps {
+                    debug_assert!(sensor_pos.x == target_point.x || max_x < 1.0 + dx);
+                    debug_assert!(sensor_pos.y == target_point.y || max_y < 1.0 + dy);
                     self.hit_voxel(&sensor_pos);
                     if max_x < max_y {
                         sensor_pos.x += dir_x;
-                        max_x += dx;
+                        max_x = Self::next_boundary(max_x, dx, sensor_pos.x == target_point.x);
                     } else {
                         sensor_pos.y += dir_y;
-                        max_y += dy;
+                        max_y = Self::next_boundary(max_y, dy, sensor_pos.y == target_point.y);
                     }
                 }
             }
@@ -344,16 +359,16 @@ impl SingleThreaded {
                 let dz = 1.0 / point.z.abs();
                 let mut max_x = Self::closest_boundary(x.is_gt(), sensor_pos_divided.x, point.x);
                 let mut max_z = Self::closest_boundary(z.is_gt(), sensor_pos_divided.z, point.z);
-                while target_point != sensor_pos {
-                    debug_assert!(max_x < 1.0 + dx);
-                    debug_assert!(max_z < 1.0 + dz);
+                for _ in 0..steps {
+                    debug_assert!(sensor_pos.x == target_point.x || max_x < 1.0 + dx);
+                    debug_assert!(sensor_pos.z == target_point.z || max_z < 1.0 + dz);
                     self.hit_voxel(&sensor_pos);
                     if max_x < max_z {
                         sensor_pos.x += dir_x;
-                        max_x += dx;
+                        max_x = Self::next_boundary(max_x, dx, sensor_pos.x == target_point.x);
                     } else {
                         sensor_pos.z += dir_z;
-                        max_z += dz;
+                        max_z = Self::next_boundary(max_z, dz, sensor_pos.z == target_point.z);
                     }
                 }
             }
@@ -362,16 +377,16 @@ impl SingleThreaded {
                 let dz = 1.0 / point.z.abs();
                 let mut max_y = Self::closest_boundary(y.is_gt(), sensor_pos_divided.y, point.y);
                 let mut max_z = Self::closest_boundary(z.is_gt(), sensor_pos_divided.z, point.z);
-                while target_point != sensor_pos {
-                    debug_assert!(max_y < 1.0 + dy);
-                    debug_assert!(max_z < 1.0 + dz);
+                for _ in 0..steps {
+                    debug_assert!(sensor_pos.y == target_point.y || max_y < 1.0 + dy);
+                    debug_assert!(sensor_pos.z == target_point.z || max_z < 1.0 + dz);
                     self.hit_voxel(&sensor_pos);
                     if max_y < max_z {
                         sensor_pos.y += dir_y;
-                        max_y += dy;
+                        max_y = Self::next_boundary(max_y, dy, sensor_pos.y == target_point.y);
                     } else {
                         sensor_pos.z += dir_z;
-                        max_z += dz;
+                        max_z = Self::next_boundary(max_z, dz, sensor_pos.z == target_point.z);
                     }
                 }
             }
@@ -382,31 +397,33 @@ impl SingleThreaded {
                 let mut max_x = Self::closest_boundary(x.is_gt(), sensor_pos_divided.x, point.x);
                 let mut max_y = Self::closest_boundary(y.is_gt(), sensor_pos_divided.y, point.y);
                 let mut max_z = Self::closest_boundary(z.is_gt(), sensor_pos_divided.z, point.z);
-                while target_point != sensor_pos {
-                    debug_assert!(max_x < 1.0 + dx);
-                    debug_assert!(max_y < 1.0 + dy);
-                    debug_assert!(max_z < 1.0 + dz);
+                for _ in 0..steps {
+                    debug_assert!(sensor_pos.x == target_point.x || max_x < 1.0 + dx);
+                    debug_assert!(sensor_pos.y == target_point.y || max_y < 1.0 + dy);
+                    debug_assert!(sensor_pos.z == target_point.z || max_z < 1.0 + dz);
                     self.hit_voxel(&sensor_pos);
                     if max_x < max_z {
                         if max_x < max_y {
                             sensor_pos.x += dir_x;
-                            max_x += dx;
+                            max_x = Self::next_boundary(max_x, dx, sensor_pos.x == target_point.x);
                         } else {
                             sensor_pos.y += dir_y;
-                            max_y += dy;
+                            max_y = Self::next_boundary(max_y, dy, sensor_pos.y == target_point.y);
                         }
                     } else {
                         if max_y < max_z {
                             sensor_pos.y += dir_y;
-                            max_y += dy;
+                            max_y = Self::next_boundary(max_y, dy, sensor_pos.y == target_point.y);
                         } else {
                             sensor_pos.z += dir_z;
-                            max_z += dz;
+                            max_z = Self::next_boundary(max_z, dz, sensor_pos.z == target_point.z);
                         }
                     }
                 }
             }
         };
+        // `steps` bounds the loops, so a wrong walk would end silently elsewhere
+        debug_assert_eq!(sensor_pos, target_point);
     }
 }
 

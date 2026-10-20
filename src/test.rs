@@ -81,6 +81,12 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
     /// Writes a voxel directly, creating its (zero filled) page when missing.
     /// Used to make pages exist so that hits become observable.
     fn set_voxel(&mut self, x: i32, y: i32, z: i32, value: u32);
+    /// [`TestVoxelizer::set_voxel`] for every `(x, y, z, value)` of `voxels`.
+    fn set_voxels(&mut self, voxels: &[(i32, i32, i32, u32)]) {
+        for &(x, y, z, value) in voxels {
+            self.set_voxel(x, y, z, value);
+        }
+    }
     /// Snapshot of every fine page, sorted by key.
     fn pages(&self) -> Vec<(Coord, [u32; PAGE_LEN])>;
     /// Snapshot of every compressed page, sorted by key. `None` when
@@ -121,9 +127,8 @@ pub(crate) fn with_i(coords: &[Coord], i: u32) -> Vec<PointI> {
     coords.iter().map(|&(x, y, z)| pi(x, y, z, i)).collect()
 }
 pub(crate) fn seed<T: TestVoxelizer>(v: &mut T, coords: &[Coord], value: u32) {
-    for &(x, y, z) in coords {
-        v.set_voxel(x, y, z, value);
-    }
+    let voxels: Vec<_> = coords.iter().map(|&(x, y, z)| (x, y, z, value)).collect();
+    v.set_voxels(&voxels);
 }
 /// The fine page with key `key`, if it exists.
 pub(crate) fn page<T: TestVoxelizer>(v: &T, key: Coord) -> Option<[u32; PAGE_LEN]> {
@@ -468,6 +473,13 @@ macro_rules! shared_tests {
             full_3d_reverse,
             sensor_on_grid_line_2d,
             ray_across_page_boundary,
+            plane_xy_point_on_corner,
+            plane_xz_point_on_corner,
+            plane_yz_point_on_corner,
+            full_3d_point_on_corner_z,
+            full_3d_point_on_corner_y,
+            ray_ends_on_voxel_corners,
+            ray_ends_near_voxel_corners,
             point_in_sensor_voxel_fresh,
             point_in_sensor_voxel_accumulates,
             compress_construct_sets_bit,
@@ -1111,6 +1123,179 @@ pub(crate) fn ray_across_page_boundary<T: TestVoxelizer>() {
         &[(2, 0, 0), (3, 0, 0), (4, 0, 0), (4, 1, 0), (5, 1, 0)],
         (6, 1, 0),
     );
+}
+
+// ---------------------------------------------- point on voxel boundaries
+//
+// A point lying on boundaries of several axes makes the last crossings tie at
+// the end of the ray. On a tie an axis that already reached the target must
+// not be stepped, as it would walk past the target and never come back.
+
+pub(crate) fn plane_xy_point_on_corner<T: TestVoxelizer>() {
+    check_ray::<T>(
+        pf(0.0, 2.0, 0.5, 1.0),
+        pf(4.0, 0.0, 0.5, 1.0),
+        &[
+            (0, 2, 0),
+            (0, 1, 0),
+            (1, 1, 0),
+            (1, 0, 0),
+            (2, 0, 0),
+            (3, 0, 0),
+        ],
+        (4, 0, 0),
+    );
+}
+
+pub(crate) fn plane_xz_point_on_corner<T: TestVoxelizer>() {
+    check_ray::<T>(
+        pf(0.0, 0.5, 2.0, 1.0),
+        pf(4.0, 0.5, 0.0, 1.0),
+        &[
+            (0, 0, 2),
+            (0, 0, 1),
+            (1, 0, 1),
+            (1, 0, 0),
+            (2, 0, 0),
+            (3, 0, 0),
+        ],
+        (4, 0, 0),
+    );
+}
+
+pub(crate) fn plane_yz_point_on_corner<T: TestVoxelizer>() {
+    check_ray::<T>(
+        pf(0.5, 0.0, 2.0, 1.0),
+        pf(0.5, 4.0, 0.0, 1.0),
+        &[
+            (0, 0, 2),
+            (0, 0, 1),
+            (0, 1, 1),
+            (0, 1, 0),
+            (0, 2, 0),
+            (0, 3, 0),
+        ],
+        (0, 4, 0),
+    );
+}
+
+pub(crate) fn full_3d_point_on_corner_z<T: TestVoxelizer>() {
+    check_ray::<T>(
+        pf(0.0, 0.0, 2.0, 1.0),
+        pf(4.0, 2.0, 0.0, 1.0),
+        &[
+            (0, 0, 2),
+            (0, 0, 1),
+            (1, 0, 1),
+            (1, 0, 0),
+            (1, 1, 0),
+            (2, 1, 0),
+            (3, 1, 0),
+            (3, 2, 0),
+        ],
+        (4, 2, 0),
+    );
+}
+
+pub(crate) fn full_3d_point_on_corner_y<T: TestVoxelizer>() {
+    check_ray::<T>(
+        pf(0.0, 2.0, 0.0, 1.0),
+        pf(4.0, 0.0, 2.0, 1.0),
+        &[
+            (0, 2, 0),
+            (0, 1, 0),
+            (1, 1, 0),
+            (1, 1, 1),
+            (1, 0, 1),
+            (2, 0, 1),
+            (3, 0, 1),
+            (3, 0, 2),
+        ],
+        (4, 0, 2),
+    );
+}
+
+/// Every voxel of the box with corners `a` and `b`.
+fn box_coords(a: Coord, b: Coord) -> Vec<Coord> {
+    let mut out = Vec::new();
+    for x in a.0.min(b.0)..=a.0.max(b.0) {
+        for y in a.1.min(b.1)..=a.1.max(b.1) {
+            for z in a.2.min(b.2)..=a.2.max(b.2) {
+                out.push((x, y, z));
+            }
+        }
+    }
+    out
+}
+
+/// Voxel holding `p`, the same way `add_points` finds it.
+fn voxel_of(p: &PointF, resolution: f32) -> Coord {
+    let p = p / resolution;
+    (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32)
+}
+
+/// Built so that targets add nothing and `add_points` reports only hits.
+fn hits_only<T: TestVoxelizer>(resolution: f32) -> T {
+    T::make(resolution, 1, 0, 0, 1, false)
+}
+
+/// Fires one ray of intensity 1 into a [`hits_only`] voxelizer and checks
+/// that it hit every voxel from the sensor one up to the target one, one
+/// voxel at a time and every step towards the target. Every voxel the ray
+/// should hit must hold more than 0.
+fn check_ray_path<T: TestVoxelizer>(v: &mut T, resolution: f32, sensor: PointF, point: PointF) {
+    let (from, to) = (voxel_of(&sensor, resolution), voxel_of(&point, resolution));
+    let distance = |a: Coord, b: Coord| (a.0 - b.0).abs() + (a.1 - b.1).abs() + (a.2 - b.2).abs();
+    let mut path: Vec<Coord> = v
+        .add_points(sensor.clone(), std::slice::from_ref(&point))
+        .into_iter()
+        .map(|p| (p.x, p.y, p.z))
+        .collect();
+    path.sort_by_key(|&c| std::cmp::Reverse(distance(c, to)));
+    path.push(to);
+    let ctx = format!("sensor {sensor:?}, point {point:?}, path {path:?}");
+    assert_eq!(path[0], from, "{ctx}");
+    for step in path.windows(2) {
+        assert_eq!(distance(step[0], step[1]), 1, "{ctx}");
+        assert_eq!(distance(step[0], to), distance(step[1], to) + 1, "{ctx}");
+    }
+}
+
+pub(crate) fn ray_ends_on_voxel_corners<T: TestVoxelizer>() {
+    let mut v = hits_only::<T>(1.0);
+    // Enough for every ray to hit the sensor voxels
+    seed(&mut v, &box_coords((-3, -3, -3), (3, 3, 3)), 1 << 16);
+    for sensor in [
+        pf(0.0, 0.0, 0.0, 1.0),
+        pf(0.5, 0.5, 0.5, 1.0),
+        pf(0.37, 0.61, 0.13, 1.0),
+    ] {
+        for c in box_coords((-2, -2, -2), (2, 2, 2)) {
+            let point = pf(c.0 as f32, c.1 as f32, c.2 as f32, 1.0);
+            check_ray_path(&mut v, 1.0, sensor.clone(), point);
+        }
+    }
+}
+
+pub(crate) fn ray_ends_near_voxel_corners<T: TestVoxelizer>() {
+    // Points on (or close to) boundaries of several axes, where float errors
+    // decide which last crossing comes first
+    const RESOLUTION: f32 = 0.1;
+    let mut v = hits_only::<T>(RESOLUTION);
+    for (sensor, point) in [
+        (pf(0.013, 1.007, 0.0047, 1.0), pf(4.0, 0.5, 0.3, 1.0)),
+        (pf(0.05, 1.05, 0.05, 1.0), pf(-3.0, 0.0, 2.0, 1.0)),
+        (pf(-0.117, 1.008, 0.0047, 1.0), pf(2.0, 0.0, 0.0, 1.0)),
+        (
+            pf(0.013, 1.007, 0.0047, 1.0),
+            pf(4.0137, 0.5213, 0.3341, 1.0),
+        ),
+        (pf(-0.117, 1.008, 0.0047, 1.0), pf(2.0173, 0.0, 0.0313, 1.0)),
+    ] {
+        let corners = (voxel_of(&sensor, RESOLUTION), voxel_of(&point, RESOLUTION));
+        seed(&mut v, &box_coords(corners.0, corners.1), SEED);
+        check_ray_path(&mut v, RESOLUTION, sensor, point);
+    }
 }
 
 // ------------------------------------------- point inside the sensor voxel
