@@ -1,7 +1,7 @@
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    Voxelizer, VoxelizerParams,
+    Multipliers, Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -25,9 +25,7 @@ pub struct SingleThreaded {
     // Pages a voxel of which got zeroed during the current call
     maybe_empty: HashSet<ThreeDim>,
     resolution: f32,
-    intensity_multiplier: f32,
-    hit_multiplier: u32,
-    target_multiplier: u32,
+    multipliers: Multipliers,
     destroy_threshold: u32,
     construct_threshold: u32,
     max_value: u32,
@@ -39,9 +37,7 @@ impl SingleThreaded {
     pub fn new(params: VoxelizerParams) -> Self {
         let VoxelizerParams {
             resolution,
-            intensity_multiplier,
-            hit_multiplier,
-            target_multiplier,
+            multipliers,
             destroy_threshold,
             construct_threshold,
             max_value,
@@ -57,9 +53,7 @@ impl SingleThreaded {
             result: HashMap::default(),
             maybe_empty: HashSet::default(),
             resolution,
-            intensity_multiplier,
-            hit_multiplier,
-            target_multiplier,
+            multipliers,
             destroy_threshold,
             construct_threshold,
             max_value,
@@ -81,7 +75,7 @@ impl Voxelizer for SingleThreaded {
             .iter()
             .for_each(|v| self.ray_march(sensor_pos_i.clone(), &sensor_pos, v.clone()));
         let resolution = self.resolution;
-        let intensity_multiplier = self.intensity_multiplier;
+        let intensity_multiplier = self.multipliers.intensity;
         points
             .iter()
             .map(move |v| v / resolution)
@@ -176,6 +170,14 @@ impl Voxelizer for SingleThreaded {
         std::mem::swap(&mut map, &mut self.result);
         self.remove_emptied(emptied_compressed);
         result
+    }
+    #[inline]
+    fn set_multipliers(&mut self, multipliers: Multipliers) {
+        self.multipliers = multipliers;
+    }
+    #[inline]
+    fn multipliers(&self) -> Multipliers {
+        self.multipliers
     }
 }
 
@@ -274,7 +276,7 @@ impl SingleThreaded {
         let entry = self.voxels.entry(idx.0).or_insert_with(|| [0; _]);
         self.result.entry(idx).or_insert(entry[idx.1]);
         entry[idx.1] = entry[idx.1]
-            .saturating_add(point.i * self.target_multiplier)
+            .saturating_add(point.i * self.multipliers.target)
             .min(self.max_value);
     }
     fn ray_march(
@@ -291,7 +293,7 @@ impl SingleThreaded {
             x: point.x.floor() as i32,
             y: point.y.floor() as i32,
             z: point.z.floor() as i32,
-            i: (point.i * self.intensity_multiplier) as u32 * self.hit_multiplier,
+            i: (point.i * self.multipliers.intensity) as u32 * self.multipliers.hit,
         };
         let dir_x = (target_point.x - sensor_pos.x).signum();
         let dir_y = (target_point.y - sensor_pos.y).signum();
@@ -415,7 +417,7 @@ mod test {
         SingleThreaded,
     };
     use crate::{
-        VoxelizerParams,
+        Multipliers, VoxelizerParams,
         geometry::PointI,
         test::{Coord, PAGE_LEN, PagedIndex, TestVoxelizer, compressed, pi, plain},
     };
@@ -469,18 +471,25 @@ mod test {
     fn new_stores_parameters() {
         let v = SingleThreaded::new(VoxelizerParams {
             resolution: 0.5,
-            intensity_multiplier: 0.25,
-            hit_multiplier: 2,
-            target_multiplier: 3,
+            multipliers: Multipliers {
+                intensity: 0.25,
+                hit: 2,
+                target: 3,
+            },
             destroy_threshold: 4,
             construct_threshold: 5,
             max_value: 6,
             compress: false,
         });
         assert_eq!(v.resolution, 0.5);
-        assert_eq!(v.intensity_multiplier, 0.25);
-        assert_eq!(v.hit_multiplier, 2);
-        assert_eq!(v.target_multiplier, 3);
+        assert_eq!(
+            v.multipliers,
+            Multipliers {
+                intensity: 0.25,
+                hit: 2,
+                target: 3,
+            }
+        );
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
         assert_eq!(v.max_value, 6);

@@ -24,8 +24,8 @@ U32_MAX = 2**32 - 1
 
 def enabled_classes():
     """Names of the classes the module must have with the enabled features."""
-    return ["PointF", "PointI"] + [cls for feature, cls in CLASS_OF_FEATURE.items()
-                                   if feature in FEATURES]
+    return ["Multipliers", "PointF", "PointI"] + [cls for feature, cls in CLASS_OF_FEATURE.items()
+                                                  if feature in FEATURES]
 
 
 def module_exports_match_features():
@@ -109,6 +109,51 @@ def point_i_setters():
     check(coords(point) == (1, -2, 3, U32_MAX), f"point became {coords(point)}")
     with raises(OverflowError):
         point.set_i(-1)
+
+
+def multiplier_values(multipliers):
+    return (multipliers.intensity(), multipliers.hit(), multipliers.target())
+
+
+def multipliers_positional():
+    multipliers = rv.Multipliers(2.5, 2, 3)
+    check(multiplier_values(multipliers) == (2.5, 2, 3))
+    check(type(multipliers.intensity()) is float)
+    check(type(multipliers.hit()) is int and type(multipliers.target()) is int)
+
+
+def multipliers_keywords():
+    # Out of order, so a swapped name shows up as swapped values.
+    check(multiplier_values(rv.Multipliers(target=3, hit=2, intensity=2.5)) == (2.5, 2, 3))
+
+
+def multipliers_rejects_out_of_range():
+    rv.Multipliers(-1.5, 0, U32_MAX)
+    with raises(OverflowError):
+        rv.Multipliers(1.0, -1, 0)
+    with raises(OverflowError):
+        rv.Multipliers(1.0, U32_MAX + 1, 0)
+    with raises(OverflowError):
+        rv.Multipliers(1.0, 0, -1)
+    with raises(OverflowError):
+        rv.Multipliers(1.0, 0, U32_MAX + 1)
+    with raises(TypeError):
+        rv.Multipliers(1.0, 1.5, 0)
+    with raises(TypeError):
+        rv.Multipliers("1", 1, 1)
+
+
+def multipliers_setters():
+    multipliers = rv.Multipliers(1.0, 1, 1)
+    multipliers.set_intensity(2.5)
+    multipliers.set_hit(U32_MAX)
+    multipliers.set_target(0)
+    values = multiplier_values(multipliers)
+    check(values == (2.5, U32_MAX, 0), f"multipliers became {values}")
+    with raises(OverflowError):
+        multipliers.set_hit(-1)
+    with raises(OverflowError):
+        multipliers.set_target(U32_MAX + 1)
 
 
 def constructors_reject_out_of_range(impl):
@@ -677,6 +722,81 @@ def intensity_multiplier_scales_hit_and_target(impl):
     expect_voxels(from_above(v, 5, 0, 0, 0.5), pi(5, 0, 0, 1 * 3))
 
 
+# ------------------------------------------------------ set multipliers
+
+
+def get_multipliers_returns_constructor_values(impl):
+    multipliers = plain(impl).get_multipliers()
+    check(type(multipliers) is rv.Multipliers,
+          f"get_multipliers returned a {type(multipliers).__name__}")
+    check(multiplier_values(multipliers) == (1.0, 1, 1))
+    v = make(impl, 1.0, 2, 3, 0, 1, False, intensity_multiplier=2.5)
+    check(multiplier_values(v.get_multipliers()) == (2.5, 2, 3))
+
+
+def get_multipliers_returns_set_values(impl):
+    v = plain(impl)
+    for values in [(2.5, 2, 3), (0.0, 0, 0), (-1.5, U32_MAX, U32_MAX), (1.0, 1, 1)]:
+        v.set_multipliers(rv.Multipliers(*values))
+        got = multiplier_values(v.get_multipliers())
+        check(got == values, f"set {values}, got {got}")
+    # The last of several sets wins, adding points leaves it as it is.
+    v.set_multipliers(rv.Multipliers(2.5, 2, 3))
+    v.set_multipliers(rv.Multipliers(1.5, 2, 3))
+    add_point(v, sensor(), pf(3.5, 0.5, 0.5, 1.0))
+    check(multiplier_values(v.get_multipliers()) == (1.5, 2, 3))
+
+
+def get_multipliers_returns_copy(impl):
+    v = plain(impl)
+    multipliers = rv.Multipliers(2.5, 2, 3)
+    v.set_multipliers(multipliers)
+    # Changing the object passed in or the one returned leaves the voxelizer
+    # as it was.
+    multipliers.set_hit(100)
+    v.get_multipliers().set_target(100)
+    check(multiplier_values(v.get_multipliers()) == (2.5, 2, 3))
+    check(multiplier_values(multipliers) == (2.5, 100, 3))
+
+
+def set_multipliers_applies_to_next_call(impl):
+    v = plain(impl)
+    seed(v, 1.0, 0, 0, 0, 20.0)
+    point = pf(3.5, 0.5, 0.5, 3.0)
+    expect_voxels(add_point(v, sensor(), point), pi(0, 0, 0, 17), pi(3, 0, 0, 3))
+    v.set_multipliers(rv.Multipliers(2.5, 2, 3))
+    # int(3 * 2.5) = 7, times 2 subtracted from and times 3 added to what the
+    # voxels hold already.
+    expect_voxels(add_point(v, sensor(), point), pi(0, 0, 0, 17 - 7 * 2), pi(3, 0, 0, 3 + 7 * 3))
+    # Setting the old ones back restores the old behaviour.
+    v.set_multipliers(rv.Multipliers(1.0, 1, 1))
+    expect_voxels(add_point(v, sensor(), point), pi(0, 0, 0, 0), pi(3, 0, 0, 24 + 3))
+
+
+def set_multipliers_rejects_wrong_type(impl):
+    v = plain(impl)
+    for bad in (None, (2.5, 2, 3), pf(2.5, 2.0, 3.0, 0.0)):
+        with raises(TypeError):
+            v.set_multipliers(bad)
+    with raises(TypeError):
+        v.set_multipliers()
+    # Probe: none of the failed calls changed anything.
+    check(multiplier_values(v.get_multipliers()) == (1.0, 1, 1))
+    expect_voxels(add_point(v, sensor(), pf(3.5, 0.5, 0.5, 1.0)), pi(3, 0, 0, 1))
+
+
+def set_multipliers_same_as_constructed(impl):
+    for destroy, construct, compress in SCENARIO_PARAMS:
+        for intensity, hit, target in [(1.5, 2, 3), (0.5, 1, 4)]:
+            v = make(impl, 1.0, 1, 1, destroy, construct, compress)
+            v.set_multipliers(rv.Multipliers(intensity, hit, target))
+            a = scenario(v)
+            b = scenario(make(impl, 1.0, hit, target, destroy, construct, compress,
+                              intensity_multiplier=intensity))
+            check(a == b, f"compress = {compress}, set to ({intensity}, {hit}, {target}): "
+                          "runs differ")
+
+
 # ------------------------------------------------------------ scenario
 
 
@@ -762,6 +882,10 @@ TEST_CASES = [
     once(point_i_keywords),
     once(point_i_rejects_out_of_range),
     once(point_i_setters),
+    once(multipliers_positional),
+    once(multipliers_keywords),
+    once(multipliers_rejects_out_of_range),
+    once(multipliers_setters),
     per_impl(constructors_reject_out_of_range),
     per_impl(constructors_accept_u32_max),
     per_impl(constructors_accept_keywords),
@@ -825,6 +949,12 @@ TEST_CASES = [
     per_impl(compress_mask_accumulates_across_calls),
     per_impl(max_value_caps_target),
     per_impl(intensity_multiplier_scales_hit_and_target),
+    per_impl(get_multipliers_returns_constructor_values),
+    per_impl(get_multipliers_returns_set_values),
+    per_impl(get_multipliers_returns_copy),
+    per_impl(set_multipliers_applies_to_next_call),
+    per_impl(set_multipliers_rejects_wrong_type),
+    per_impl(set_multipliers_same_as_constructed),
     per_impl(scenario_repeatable),
     once(single_and_multi_agree, "single_threaded", "multi_threaded"),
     once(multi_thread_count_zero, "multi_threaded"),

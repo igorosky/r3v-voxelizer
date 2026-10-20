@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 
 use crate::{
-    Voxelizer,
+    Multipliers, Voxelizer,
     geometry::{PointF, PointI},
 };
 
@@ -29,9 +29,11 @@ fn params(
 ) -> crate::VoxelizerParams {
     crate::VoxelizerParams {
         resolution,
-        intensity_multiplier,
-        hit_multiplier,
-        target_multiplier,
+        multipliers: Multipliers {
+            intensity: intensity_multiplier,
+            hit: hit_multiplier,
+            target: target_multiplier,
+        },
         destroy_threshold,
         construct_threshold,
         max_value,
@@ -180,6 +182,33 @@ pub extern "C" fn add_points(
     let data = result.as_mut_ptr();
     std::mem::forget(result);
     VoxelsUpdate { data, len }
+}
+
+/// Multipliers used by the following `add_points` calls of `voxelizer`.
+/// Voxels keep the values they got so far. Does nothing when `voxelizer` is
+/// NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn set_multipliers(voxelizer: *mut c_void, multipliers: Multipliers) {
+    if voxelizer.is_null() {
+        return;
+    }
+    let voxelizer = unsafe { &mut *(voxelizer as *mut Box<dyn Voxelizer>) };
+    voxelizer.set_multipliers(multipliers);
+}
+
+/// Multipliers used by `add_points` of `voxelizer`. All 0 when `voxelizer`
+/// is NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn get_multipliers(voxelizer: *const c_void) -> Multipliers {
+    if voxelizer.is_null() {
+        return Multipliers {
+            intensity: 0.0,
+            hit: 0,
+            target: 0,
+        };
+    }
+    let voxelizer = unsafe { &*(voxelizer as *const Box<dyn Voxelizer>) };
+    voxelizer.multipliers()
 }
 
 #[unsafe(no_mangle)]

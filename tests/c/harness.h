@@ -85,6 +85,7 @@ void check_update(VoxelsUpdate update, const PointI *expected, size_t expected_l
 
 PointF pf(float x, float y, float z, float i);
 PointI pi(int32_t x, int32_t y, int32_t z, uint32_t i);
+Multipliers mult(float intensity, uint32_t hit, uint32_t target);
 
 /* Creates a voxelizer of the given type. Fails the test on NULL. */
 void *make_full(const Impl *impl, float resolution, float intensity_multiplier,

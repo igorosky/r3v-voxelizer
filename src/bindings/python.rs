@@ -71,8 +71,38 @@ mod r3v_voxelizer {
         }
     }
 
+    #[pyo3::pymethods]
+    impl Multipliers {
+        #[new]
+        pub fn new(intensity: f32, hit: u32, target: u32) -> Self {
+            Self {
+                intensity,
+                hit,
+                target,
+            }
+        }
+        pub fn intensity(&self) -> f32 {
+            self.intensity
+        }
+        pub fn set_intensity(&mut self, intensity: f32) {
+            self.intensity = intensity;
+        }
+        pub fn hit(&self) -> u32 {
+            self.hit
+        }
+        pub fn set_hit(&mut self, hit: u32) {
+            self.hit = hit;
+        }
+        pub fn target(&self) -> u32 {
+            self.target
+        }
+        pub fn set_target(&mut self, target: u32) {
+            self.target = target;
+        }
+    }
+
     #[pymodule_export]
-    use crate::{PointF, PointI};
+    use crate::{Multipliers, PointF, PointI};
 
     #[cfg(feature = "single_threaded")]
     #[pyo3::pyclass]
@@ -96,9 +126,11 @@ mod r3v_voxelizer {
         ) -> Self {
             Self(crate::SingleThreaded::new(crate::VoxelizerParams {
                 resolution,
-                intensity_multiplier,
-                hit_multiplier,
-                target_multiplier,
+                multipliers: crate::Multipliers {
+                    intensity: intensity_multiplier,
+                    hit: hit_multiplier,
+                    target: target_multiplier,
+                },
                 destroy_threshold,
                 construct_threshold,
                 max_value,
@@ -107,6 +139,15 @@ mod r3v_voxelizer {
         }
         fn add_points(&mut self, sensor_pos: PointF, points: Vec<PointF>) -> Vec<PointI> {
             self.0.add_points(sensor_pos, points.as_slice())
+        }
+        /// Multipliers used by the following `add_points` calls, voxels keep
+        /// the values they got so far.
+        fn set_multipliers(&mut self, multipliers: Multipliers) {
+            self.0.set_multipliers(multipliers);
+        }
+        /// Copy of the multipliers used by `add_points`.
+        fn get_multipliers(&self) -> Multipliers {
+            self.0.multipliers()
         }
     }
 
@@ -134,9 +175,11 @@ mod r3v_voxelizer {
             match crate::MultiThreaded::new(
                 crate::VoxelizerParams {
                     resolution,
-                    intensity_multiplier,
-                    hit_multiplier,
-                    target_multiplier,
+                    multipliers: crate::Multipliers {
+                        intensity: intensity_multiplier,
+                        hit: hit_multiplier,
+                        target: target_multiplier,
+                    },
                     destroy_threshold,
                     construct_threshold,
                     max_value,
@@ -150,6 +193,15 @@ mod r3v_voxelizer {
         }
         fn add_points(&mut self, sensor_pos: PointF, points: Vec<PointF>) -> Vec<PointI> {
             self.0.add_points(sensor_pos, points.as_slice())
+        }
+        /// Multipliers used by the following `add_points` calls, voxels keep
+        /// the values they got so far.
+        fn set_multipliers(&mut self, multipliers: Multipliers) {
+            self.0.set_multipliers(multipliers);
+        }
+        /// Copy of the multipliers used by `add_points`.
+        fn get_multipliers(&self) -> Multipliers {
+            self.0.multipliers()
         }
     }
 
@@ -177,9 +229,11 @@ mod r3v_voxelizer {
             match pollster::block_on(crate::WgpuAccelerated::new(
                 crate::VoxelizerParams {
                     resolution,
-                    intensity_multiplier,
-                    hit_multiplier,
-                    target_multiplier,
+                    multipliers: crate::Multipliers {
+                        intensity: intensity_multiplier,
+                        hit: hit_multiplier,
+                        target: target_multiplier,
+                    },
                     destroy_threshold,
                     construct_threshold,
                     max_value,
@@ -196,6 +250,15 @@ mod r3v_voxelizer {
         }
         fn add_points(&mut self, sensor_pos: PointF, points: Vec<PointF>) -> Vec<PointI> {
             self.0.add_points(sensor_pos, points.as_slice())
+        }
+        /// Multipliers used by the following `add_points` calls, voxels keep
+        /// the values they got so far.
+        fn set_multipliers(&mut self, multipliers: Multipliers) {
+            self.0.set_multipliers(multipliers);
+        }
+        /// Copy of the multipliers used by `add_points`.
+        fn get_multipliers(&self) -> Multipliers {
+            self.0.multipliers()
         }
         /// GPU memory taken by the hashmap of `bucket_count` buckets, in bytes.
         #[staticmethod]

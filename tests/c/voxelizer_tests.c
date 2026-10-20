@@ -545,6 +545,76 @@ static void intensity_multiplier_scales_hit_and_target(const Impl *impl) {
     drop_voxelizer(v);
 }
 
+/* -------------------------------------------------- set multipliers */
+
+static bool same_multipliers(Multipliers a, Multipliers b) {
+    return a.intensity == b.intensity && a.hit == b.hit && a.target == b.target;
+}
+
+static void get_multipliers_returns_constructor_values(const Impl *impl) {
+    void *v = plain(impl);
+    CHECK(same_multipliers(get_multipliers(v), mult(1.0f, 1, 1)));
+    drop_voxelizer(v);
+    v = make_full(impl, 1.0f, 2.5f, 2, 3, 0, 1, UINT32_MAX, false);
+    CHECK(same_multipliers(get_multipliers(v), mult(2.5f, 2, 3)));
+    drop_voxelizer(v);
+}
+
+static void get_multipliers_returns_set_values(const Impl *impl) {
+    const Multipliers values[] = {mult(2.5f, 2, 3), mult(0.0f, 0, 0),
+                                  mult(-1.5f, UINT32_MAX, UINT32_MAX), mult(1.0f, 1, 1)};
+    void *v = plain(impl);
+    for (size_t k = 0; k < ARRAY_LEN(values); ++k) {
+        set_multipliers(v, values[k]);
+        CHECK(same_multipliers(get_multipliers(v), values[k]));
+    }
+    /* The last of several sets wins, adding points leaves it as it is. */
+    set_multipliers(v, mult(2.5f, 2, 3));
+    set_multipliers(v, mult(1.5f, 2, 3));
+    drop_update(add_point(v, SENSOR, pf(3.5f, 0.5f, 0.5f, 1.0f)));
+    CHECK(same_multipliers(get_multipliers(v), mult(1.5f, 2, 3)));
+    drop_voxelizer(v);
+}
+
+static void set_multipliers_applies_to_next_call(const Impl *impl) {
+    void *v = plain(impl);
+    seed_at(v, 0, 0, 0, 20);
+    PointF point = pf(3.5f, 0.5f, 0.5f, 3.0f);
+    EXPECT_VOXELS(add_point(v, SENSOR, point), pi(0, 0, 0, 17), pi(3, 0, 0, 3));
+    set_multipliers(v, mult(2.5f, 2, 3));
+    /* (3 * 2.5) as u32 = 7, times 2 subtracted from and times 3 added to what
+     * the voxels hold already. */
+    EXPECT_VOXELS(add_point(v, SENSOR, point), pi(0, 0, 0, 17 - 7 * 2),
+                  pi(3, 0, 0, 3 + 7 * 3));
+    /* Setting the old ones back restores the old behaviour. */
+    set_multipliers(v, mult(1.0f, 1, 1));
+    EXPECT_VOXELS(add_point(v, SENSOR, point), pi(0, 0, 0, 0), pi(3, 0, 0, 24 + 3));
+    drop_voxelizer(v);
+}
+
+static void set_multipliers_same_as_constructed(const Impl *impl) {
+    const Multipliers values[] = {mult(1.5f, 2, 3), mult(0.5f, 1, 4)};
+    for (size_t k = 0; k < ARRAY_LEN(SCENARIO_PARAMS); ++k) {
+        const ScenarioParams *p = &SCENARIO_PARAMS[k];
+        for (size_t n = 0; n < ARRAY_LEN(values); ++n) {
+            const Multipliers m = values[n];
+            void *set = make(impl, 1.0f, 1, 1, p->destroy_threshold, p->construct_threshold,
+                             p->compress);
+            set_multipliers(set, m);
+            Snapshot a = scenario(set);
+            Snapshot b = scenario(make_full(impl, 1.0f, m.intensity, m.hit, m.target,
+                                            p->destroy_threshold, p->construct_threshold,
+                                            UINT32_MAX, p->compress));
+            char ctx[96];
+            snprintf(ctx, sizeof ctx, "compress = %s, set to (%g, %u, %u)",
+                     p->compress ? "true" : "false", (double)m.intensity, m.hit, m.target);
+            check_snapshot_eq(&a, &b, ctx, __FILE__, __LINE__);
+            snapshot_free(&a);
+            snapshot_free(&b);
+        }
+    }
+}
+
 /* --------------------------------------------------------- scenario */
 
 static void scenario_repeatable(const Impl *impl) {
@@ -676,6 +746,12 @@ static void null_voxelizer(const Impl *unused) {
     drop_update(update);
 }
 
+static void multipliers_null_voxelizer(const Impl *unused) {
+    (void)unused;
+    set_multipliers(NULL, mult(2.5f, 2, 3));
+    CHECK(same_multipliers(get_multipliers(NULL), mult(0.0f, 0, 0)));
+}
+
 static void compress_helpers_self_check(const Impl *unused) {
     (void)unused;
     CHECK(block_bit(3, 3, 1) == 1u << 31);
@@ -746,6 +822,10 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(compress_mask_accumulates_across_calls),
     PER_IMPL(max_value_caps_target),
     PER_IMPL(intensity_multiplier_scales_hit_and_target),
+    PER_IMPL(get_multipliers_returns_constructor_values),
+    PER_IMPL(get_multipliers_returns_set_values),
+    PER_IMPL(set_multipliers_applies_to_next_call),
+    PER_IMPL(set_multipliers_same_as_constructed),
     PER_IMPL(scenario_repeatable),
     PER_IMPL(null_points_zero_count),
     PER_IMPL(null_points_nonzero_count),
@@ -761,6 +841,7 @@ const TestCase TEST_CASES[] = {
     GLOBAL(drop_voxelizer_null),
     GLOBAL(drop_update_empty),
     GLOBAL(null_voxelizer),
+    GLOBAL(multipliers_null_voxelizer),
     GLOBAL(compress_helpers_self_check),
 };
 const size_t TEST_CASE_COUNT = ARRAY_LEN(TEST_CASES);

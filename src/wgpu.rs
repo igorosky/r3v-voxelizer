@@ -1,5 +1,5 @@
 use crate::{
-    Voxelizer, VoxelizerParams,
+    Multipliers, Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI},
 };
 
@@ -84,9 +84,7 @@ pub struct WgpuAccelerated {
     max_binding_size: u64,
     max_workgroups: u32,
     resolution: f32,
-    intensity_multiplier: f32,
-    hit_multiplier: u32,
-    target_multiplier: u32,
+    multipliers: Multipliers,
     destroy_threshold: u32,
     construct_threshold: u32,
     max_value: u32,
@@ -98,6 +96,16 @@ impl Voxelizer for WgpuAccelerated {
     /// for targets that cannot block (the web).
     fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI> {
         pollster::block_on(self.add_points_async(sensor_pos, points))
+    }
+    /// Takes effect with the next call, the shader gets the multipliers with
+    /// every dispatch.
+    #[inline]
+    fn set_multipliers(&mut self, multipliers: Multipliers) {
+        self.multipliers = multipliers;
+    }
+    #[inline]
+    fn multipliers(&self) -> Multipliers {
+        self.multipliers
     }
 }
 
@@ -201,9 +209,7 @@ impl WgpuAccelerated {
     pub async fn new(params: VoxelizerParams, bucket_count: u32) -> Option<Self> {
         let VoxelizerParams {
             resolution,
-            intensity_multiplier,
-            hit_multiplier,
-            target_multiplier,
+            multipliers,
             destroy_threshold,
             construct_threshold,
             max_value,
@@ -370,9 +376,7 @@ impl WgpuAccelerated {
             buckets,
             voxels,
             resolution,
-            intensity_multiplier,
-            hit_multiplier,
-            target_multiplier,
+            multipliers,
             destroy_threshold,
             construct_threshold,
             max_value,
@@ -470,15 +474,15 @@ impl WgpuAccelerated {
             camera[1].to_bits(),
             camera[2].to_bits(),
             self.resolution.to_bits(),
-            self.hit_multiplier,
-            self.target_multiplier,
+            self.multipliers.hit,
+            self.multipliers.target,
             self.destroy_threshold,
             self.construct_threshold,
             count,
             first,
             u32::from(self.compress),
             self.max_value,
-            self.intensity_multiplier.to_bits(),
+            self.multipliers.intensity.to_bits(),
             0,
             0,
             0,
@@ -568,7 +572,7 @@ mod test {
         Kernel, VOXEL_BYTES, WgpuAccelerated,
     };
     use crate::{
-        Voxelizer, VoxelizerParams,
+        Multipliers, Voxelizer, VoxelizerParams,
         geometry::{PointI, ZOrder},
         test::{
             COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PLAIN, PagedIndex, TestVoxelizer, along_x,
@@ -604,9 +608,11 @@ mod test {
         with_buckets(
             VoxelizerParams {
                 resolution,
-                intensity_multiplier: 1.0,
-                hit_multiplier,
-                target_multiplier,
+                multipliers: Multipliers {
+                    intensity: 1.0,
+                    hit: hit_multiplier,
+                    target: target_multiplier,
+                },
                 destroy_threshold,
                 construct_threshold,
                 max_value: u32::MAX,
@@ -784,9 +790,11 @@ mod test {
         let v = with_buckets(
             VoxelizerParams {
                 resolution: 0.5,
-                intensity_multiplier: 0.25,
-                hit_multiplier: 2,
-                target_multiplier: 3,
+                multipliers: Multipliers {
+                    intensity: 0.25,
+                    hit: 2,
+                    target: 3,
+                },
                 destroy_threshold: 4,
                 construct_threshold: 5,
                 max_value: 6,
@@ -795,9 +803,14 @@ mod test {
             16,
         );
         assert_eq!(v.resolution, 0.5);
-        assert_eq!(v.intensity_multiplier, 0.25);
-        assert_eq!(v.hit_multiplier, 2);
-        assert_eq!(v.target_multiplier, 3);
+        assert_eq!(
+            v.multipliers,
+            Multipliers {
+                intensity: 0.25,
+                hit: 2,
+                target: 3,
+            }
+        );
         assert_eq!(v.destroy_threshold, 4);
         assert_eq!(v.construct_threshold, 5);
         assert_eq!(v.max_value, 6);

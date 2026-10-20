@@ -13,7 +13,7 @@
 ))]
 
 use crate::{
-    Voxelizer, VoxelizerParams,
+    Multipliers, Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -27,13 +27,17 @@ pub(crate) const COMPRESSED_PAGE_LEN: usize = 4096;
 /// Hits saturate at zero, so a voxel must hold something before a hit on
 /// it becomes observable. Hit voxels are seeded with this value.
 pub(crate) const SEED: u32 = 10;
+/// Multipliers leaving intensities as they are.
+pub(crate) const UNSCALED: Multipliers = Multipliers {
+    intensity: 1.0,
+    hit: 1,
+    target: 1,
+};
 /// Resolution 1, multipliers 1, destroy at 0, construct at 1, no cap, no
 /// compression.
 pub(crate) const PLAIN: VoxelizerParams = VoxelizerParams {
     resolution: 1.0,
-    intensity_multiplier: 1.0,
-    hit_multiplier: 1,
-    target_multiplier: 1,
+    multipliers: UNSCALED,
     destroy_threshold: 0,
     construct_threshold: 1,
     max_value: u32::MAX,
@@ -60,9 +64,11 @@ pub(crate) trait TestVoxelizer: Voxelizer + Sized {
     ) -> Self {
         Self::with_params(VoxelizerParams {
             resolution,
-            intensity_multiplier: 1.0,
-            hit_multiplier,
-            target_multiplier,
+            multipliers: Multipliers {
+                hit: hit_multiplier,
+                target: target_multiplier,
+                ..UNSCALED
+            },
             destroy_threshold,
             construct_threshold,
             max_value: u32::MAX,
@@ -299,7 +305,10 @@ pub(crate) const SCENARIO_PARAMS: [VoxelizerParams; 6] = [
         ..PLAIN
     },
     VoxelizerParams {
-        intensity_multiplier: 1.5,
+        multipliers: Multipliers {
+            intensity: 1.5,
+            ..UNSCALED
+        },
         ..PLAIN
     },
 ];
@@ -342,17 +351,38 @@ pub(crate) struct Snapshot {
     pub(crate) compressed: Option<Vec<(Coord, Vec<u64>)>>,
 }
 
+/// Multipliers [`scenario_with`] switches to before call 2, different from
+/// [`UNSCALED`] in every field.
+pub(crate) const SWITCHED: Multipliers = Multipliers {
+    intensity: 1.5,
+    hit: 2,
+    target: 3,
+};
+
 /// Two calls from the origin. Call 1 targets the faces of a cube of size 50
 /// (intensities 1..=5). Call 2 targets a cube of size 100 (intensities
 /// 1..=3) and every one of its rays crosses exactly one target of call 1 on
 /// the way, so hits on non zero voxels do happen. Within a call no target
 /// lies on another ray's path and hits only subtract, so the outcome does
 /// not depend on the order in which rays are processed.
-pub(crate) fn scenario<T: TestVoxelizer>(mut v: T) -> Snapshot {
+pub(crate) fn scenario<T: TestVoxelizer>(v: T) -> Snapshot {
+    scenario_with(v, None)
+}
+
+/// [`scenario`] with the multipliers set to `switch` (when given) between
+/// the two calls.
+pub(crate) fn scenario_with<T: TestVoxelizer>(mut v: T, switch: Option<Multipliers>) -> Snapshot {
     let sensor = pf(0.5, 0.5, 0.5, 1.0);
     let mut rng = 0x5EED;
     let mut results = Vec::new();
-    for (dist, half, step, max_i) in [(50, 20, 4, 5), (100, 40, 8, 3)] {
+    for (call, (dist, half, step, max_i)) in
+        [(50, 20, 4, 5), (100, 40, 8, 3)].into_iter().enumerate()
+    {
+        if call == 1
+            && let Some(multipliers) = switch
+        {
+            v.set_multipliers(multipliers);
+        }
         let points: Vec<PointF> = cube_faces(dist, half, step)
             .into_iter()
             .map(|(x, y, z)| {
@@ -469,7 +499,19 @@ macro_rules! shared_tests {
             intensity_multiplier_scales_hit,
             intensity_multiplier_truncates_after_scaling,
             intensity_multiplier_zero_or_negative,
+            multipliers_returns_constructor_values,
+            set_multipliers_roundtrip,
+            multipliers_unchanged_by_add_points,
+            set_multipliers_applies_to_next_call,
+            set_multipliers_keeps_voxels,
+            set_intensity_multiplier_only,
+            set_hit_multiplier_only,
+            set_target_multiplier_only,
+            set_hit_multiplier_zero_spares_hit_voxels,
+            set_multipliers_with_compress,
+            set_multipliers_same_as_constructed,
             scenario_repeatable,
+            switched_scenario_repeatable,
         );
     };
     (@each $ty:ty; $($name:ident),* $(,)?) => {
@@ -1473,7 +1515,10 @@ pub(crate) fn max_value_caps_target<T: TestVoxelizer>() {
 pub(crate) fn max_value_caps_within_one_call<T: TestVoxelizer>() {
     // The cap applies after the target multiplier: 4 * 1 * 3 = 12 > 10.
     let mut v = T::with_params(VoxelizerParams {
-        target_multiplier: 3,
+        multipliers: Multipliers {
+            target: 3,
+            ..UNSCALED
+        },
         max_value: 10,
         ..PLAIN
     });
@@ -1550,9 +1595,11 @@ fn scaled<T: TestVoxelizer>(
     target_multiplier: u32,
 ) -> T {
     T::with_params(VoxelizerParams {
-        intensity_multiplier,
-        hit_multiplier,
-        target_multiplier,
+        multipliers: Multipliers {
+            intensity: intensity_multiplier,
+            hit: hit_multiplier,
+            target: target_multiplier,
+        },
         ..PLAIN
     })
 }
@@ -1598,6 +1645,207 @@ pub(crate) fn intensity_multiplier_zero_or_negative<T: TestVoxelizer>() {
     }
 }
 
+// --------------------------------------------------------- set multipliers
+
+/// Multipliers different from [`UNSCALED`] and [`SWITCHED`] in every field.
+const OTHER: Multipliers = Multipliers {
+    intensity: 2.5,
+    hit: 2,
+    target: 3,
+};
+
+pub(crate) fn multipliers_returns_constructor_values<T: TestVoxelizer>() {
+    assert_eq!(plain::<T>().multipliers(), UNSCALED);
+    let v = T::with_params(VoxelizerParams {
+        multipliers: OTHER,
+        ..PLAIN
+    });
+    assert_eq!(v.multipliers(), OTHER);
+}
+
+pub(crate) fn set_multipliers_roundtrip<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    for multipliers in [
+        OTHER,
+        Multipliers {
+            intensity: 0.0,
+            hit: 0,
+            target: 0,
+        },
+        Multipliers {
+            intensity: -1.5,
+            hit: u32::MAX,
+            target: u32::MAX,
+        },
+        UNSCALED,
+    ] {
+        v.set_multipliers(multipliers);
+        assert_eq!(v.multipliers(), multipliers);
+    }
+    // The last of several sets wins.
+    v.set_multipliers(OTHER);
+    v.set_multipliers(SWITCHED);
+    assert_eq!(v.multipliers(), SWITCHED);
+}
+
+pub(crate) fn multipliers_unchanged_by_add_points<T: TestVoxelizer>() {
+    for compress in [false, true] {
+        let mut v = T::with_params(VoxelizerParams {
+            multipliers: OTHER,
+            compress,
+            ..PLAIN
+        });
+        along_x(&mut v, 0, 3, 0, 0, 1.0);
+        along_x(&mut v, 0, 7, 0, 0, 2.0);
+        assert_eq!(v.multipliers(), OTHER, "compress = {compress}");
+        v.set_multipliers(SWITCHED);
+        along_x(&mut v, 0, 7, 0, 0, 2.0);
+        assert_eq!(v.multipliers(), SWITCHED, "compress = {compress}");
+    }
+}
+
+pub(crate) fn set_multipliers_applies_to_next_call<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(0, 0, 0, 20);
+    let sensor = pf(0.5, 0.5, 0.5, 1.0);
+    let points = [pf(3.5, 0.5, 0.5, 3.0)];
+    assert_eq!(
+        sorted(v.add_points(sensor.clone(), &points)),
+        vec![pi(0, 0, 0, 17), pi(3, 0, 0, 3)]
+    );
+    v.set_multipliers(OTHER);
+    // (3 * 2.5) as u32 = 7, times 2 subtracted from and times 3 added to what
+    // the voxels hold already.
+    assert_eq!(
+        sorted(v.add_points(sensor.clone(), &points)),
+        vec![pi(0, 0, 0, 17 - 7 * 2), pi(3, 0, 0, 3 + 7 * 3)]
+    );
+    // Setting the old ones back restores the old behaviour.
+    v.set_multipliers(UNSCALED);
+    assert_eq!(
+        sorted(v.add_points(sensor, &points)),
+        vec![pi(0, 0, 0, 0), pi(3, 0, 0, 24 + 3)]
+    );
+    assert_eq!(nonzero_voxels(&v), vec![pi(3, 0, 0, 27)]);
+    assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn set_multipliers_keeps_voxels<T: TestVoxelizer>() {
+    for compress in [false, true] {
+        let mut v = T::with_params(VoxelizerParams { compress, ..PLAIN });
+        v.set_voxel(0, 0, 0, SEED);
+        along_x(&mut v, 0, 3, 0, 0, 2.0);
+        let pages = v.pages();
+        let compressed_pages = v.compressed_pages();
+        v.set_multipliers(OTHER);
+        assert_eq!(v.pages(), pages, "compress = {compress}");
+        assert_eq!(
+            v.compressed_pages(),
+            compressed_pages,
+            "compress = {compress}"
+        );
+        // Nothing to report until points are added.
+        assert!(v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[]).is_empty());
+        assert_eq!(v.pages(), pages, "compress = {compress}");
+        assert_eq!(v.pending_results(), 0);
+    }
+}
+
+pub(crate) fn set_intensity_multiplier_only<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(0, 0, 0, SEED);
+    v.set_multipliers(Multipliers {
+        intensity: 0.5,
+        ..UNSCALED
+    });
+    // (5 * 0.5) as u32 = 2 on both sides.
+    let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 5.0)]);
+    assert_eq!(sorted(result), vec![pi(0, 0, 0, SEED - 2), pi(3, 0, 0, 2)]);
+}
+
+pub(crate) fn set_hit_multiplier_only<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(0, 0, 0, SEED);
+    v.set_multipliers(Multipliers { hit: 4, ..UNSCALED });
+    let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 2.0)]);
+    assert_eq!(
+        sorted(result),
+        vec![pi(0, 0, 0, SEED - 2 * 4), pi(3, 0, 0, 2)]
+    );
+}
+
+pub(crate) fn set_target_multiplier_only<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    v.set_voxel(0, 0, 0, SEED);
+    v.set_multipliers(Multipliers {
+        target: 4,
+        ..UNSCALED
+    });
+    let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &[pf(3.5, 0.5, 0.5, 2.0)]);
+    assert_eq!(
+        sorted(result),
+        vec![pi(0, 0, 0, SEED - 2), pi(3, 0, 0, 2 * 4)]
+    );
+}
+
+pub(crate) fn set_hit_multiplier_zero_spares_hit_voxels<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    let hits = [(0, 0, 0), (1, 0, 0), (2, 0, 0)];
+    seed(&mut v, &hits, SEED);
+    v.set_multipliers(Multipliers { hit: 0, ..UNSCALED });
+    // Rays pass through without changing (or reporting) anything.
+    assert_eq!(along_x(&mut v, 0, 3, 0, 0, 5.0), vec![pi(3, 0, 0, 5)]);
+    for &(x, y, z) in &hits {
+        assert_eq!(get_voxel(&v, x, y, z), Some(SEED), "voxel ({x}, {y}, {z})");
+    }
+    assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn set_multipliers_with_compress<T: TestVoxelizer>() {
+    let mut v = T::make(1.0, 1, 1, 2, 6, true);
+    assert!(from_above(&mut v, (3, 0, 0), 2.0).is_empty());
+    // 2 + 2 * 3 = 8 reaches the construct threshold, 2 + 2 would not.
+    v.set_multipliers(Multipliers {
+        target: 3,
+        ..UNSCALED
+    });
+    assert_eq!(
+        from_above(&mut v, (3, 0, 0), 2.0),
+        vec![block(3, 0, 0, block_bit(3, 0, 0))]
+    );
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(8));
+    // A single hit of 6 destroys it, 8 - 1 would not.
+    v.set_multipliers(Multipliers { hit: 6, ..UNSCALED });
+    assert_eq!(along_x(&mut v, 3, 5, 0, 0, 1.0), vec![block(3, 0, 0, 0)]);
+    assert_eq!(get_voxel(&v, 3, 0, 0), Some(2));
+    assert!(compressed_bits(&v).is_empty());
+}
+
+pub(crate) fn set_multipliers_same_as_constructed<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS {
+        for multipliers in [
+            SWITCHED,
+            Multipliers {
+                intensity: 0.5,
+                hit: 1,
+                target: 4,
+            },
+        ] {
+            let mut set = T::with_params(params);
+            set.set_multipliers(multipliers);
+            let constructed = T::with_params(VoxelizerParams {
+                multipliers,
+                ..params
+            });
+            assert_snapshot_eq(
+                &scenario(set),
+                &scenario(constructed),
+                &format!("{params:?}, set to {multipliers:?}"),
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------- scenario
 
 pub(crate) fn scenario_repeatable<T: TestVoxelizer>() {
@@ -1605,6 +1853,19 @@ pub(crate) fn scenario_repeatable<T: TestVoxelizer>() {
         let a = scenario(T::with_params(params));
         assert!(a.results.iter().all(|r| !r.is_empty()));
         let b = scenario(T::with_params(params));
+        assert_snapshot_eq(&a, &b, &format!("{params:?}"));
+    }
+}
+
+pub(crate) fn switched_scenario_repeatable<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS {
+        let a = scenario_with(T::with_params(params), Some(SWITCHED));
+        assert!(a.results.iter().all(|r| !r.is_empty()));
+        // Switching changes the outcome of call 2 only.
+        let unswitched = scenario(T::with_params(params));
+        assert_eq!(a.results[0], unswitched.results[0], "{params:?}");
+        assert_ne!(a.results[1], unswitched.results[1], "{params:?}");
+        let b = scenario_with(T::with_params(params), Some(SWITCHED));
         assert_snapshot_eq(&a, &b, &format!("{params:?}"));
     }
 }
@@ -1649,13 +1910,21 @@ fn cube_faces_self_check() {
 #[test]
 fn single_and_multi_agree() {
     use crate::{MultiThreaded, SingleThreaded};
-    for params in SCENARIO_PARAMS {
-        let expected = scenario(SingleThreaded::new(params));
-        assert!(expected.results.iter().all(|r| !r.is_empty()));
-        for threads in [1, 2, 4, 8] {
-            let got =
-                scenario(MultiThreaded::new(params, threads).expect("thread pool must build"));
-            assert_snapshot_eq(&got, &expected, &format!("{params:?}, threads = {threads}"));
+    for switch in [None, Some(SWITCHED)] {
+        for params in SCENARIO_PARAMS {
+            let expected = scenario_with(SingleThreaded::new(params), switch);
+            assert!(expected.results.iter().all(|r| !r.is_empty()));
+            for threads in [1, 2, 4, 8] {
+                let got = scenario_with(
+                    MultiThreaded::new(params, threads).expect("thread pool must build"),
+                    switch,
+                );
+                assert_snapshot_eq(
+                    &got,
+                    &expected,
+                    &format!("{params:?}, switch = {switch:?}, threads = {threads}"),
+                );
+            }
         }
     }
 }
@@ -1664,13 +1933,16 @@ fn single_and_multi_agree() {
 #[test]
 fn single_and_wgpu_agree() {
     use crate::{SingleThreaded, WgpuAccelerated};
-    for params in SCENARIO_PARAMS {
-        let expected = scenario(SingleThreaded::new(params));
-        assert!(expected.results.iter().all(|r| !r.is_empty()));
-        let got = scenario(
-            pollster::block_on(WgpuAccelerated::new(params, 1 << 12))
-                .expect("a GPU adapter with compute shaders is required"),
-        );
-        assert_snapshot_eq(&got, &expected, &format!("{params:?}"));
+    for switch in [None, Some(SWITCHED)] {
+        for params in SCENARIO_PARAMS {
+            let expected = scenario_with(SingleThreaded::new(params), switch);
+            assert!(expected.results.iter().all(|r| !r.is_empty()));
+            let got = scenario_with(
+                pollster::block_on(WgpuAccelerated::new(params, 1 << 12))
+                    .expect("a GPU adapter with compute shaders is required"),
+                switch,
+            );
+            assert_snapshot_eq(&got, &expected, &format!("{params:?}, switch = {switch:?}"));
+        }
     }
 }
