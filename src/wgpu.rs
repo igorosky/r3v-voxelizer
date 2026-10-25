@@ -26,6 +26,8 @@ const POINT_BYTES: u64 = 16;
 const INITIAL_CAPACITY: u64 = 1024;
 /// Environment variable turning on the diagnostics printed to stderr
 const DEBUG_ENV: &str = "R3V_VOXELIZER_DEBUG";
+/// Counts (`altered`, output `len`) remembered for debug reports
+const RECENT_COUNTS: usize = 8;
 /// Misaligned outputs reported per voxelizer in debug mode
 const MAX_DEBUG_REPORTS: u32 = 3;
 /// Blocks and entries a debug report lists
@@ -103,6 +105,8 @@ pub struct WgpuAccelerated {
     debug: bool,
     adapter_info: wgpu::AdapterInfo,
     debug_reports: u32,
+    /// Last counts read back, in debug mode
+    recent_counts: Vec<u32>,
 }
 
 impl Voxelizer for WgpuAccelerated {
@@ -158,6 +162,7 @@ impl WgpuAccelerated {
         }
 
         let altered = self.read_words(self.encoder(), &self.altered, 0, 1).await[0];
+        self.note_count(altered);
         let per_entry = if self.compress {
             2
         } else {
@@ -180,6 +185,7 @@ impl WgpuAccelerated {
                 self.dispatch(&mut encoder, Kernel::ReclaimRemoved, altered);
             }
             let len = self.read_words(encoder, &self.output, 0, 1).await[0];
+            self.note_count(len);
             if len != 0 {
                 let data = self
                     .read_back(
@@ -431,6 +437,7 @@ impl WgpuAccelerated {
             debug,
             adapter_info,
             debug_reports: 0,
+            recent_counts: Vec::new(),
         })
     }
 
@@ -568,19 +575,46 @@ impl WgpuAccelerated {
     /// `offset` once everything submitted so far has finished.
     async fn read_back(
         &self,
-        mut encoder: wgpu::CommandEncoder,
+        encoder: wgpu::CommandEncoder,
         source: &wgpu::Buffer,
         offset: u64,
         size: u64,
     ) -> Vec<u8> {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        self.read_back_with(encoder, source, offset, size, false, |data| {
+            // On the Jetson the GPU's writes do not evict the CPU's stale
+            // copies of the lines it wrote
+            invalidate_cpu_cache(data);
+            data.to_vec()
+        })
+        .await
+    }
+
+    /// [`WgpuAccelerated::read_back`] handing the mapped bytes to `read`.
+    /// With `spacer` a buffer of the same size is held while the staging
+    /// buffer is created, so that the staging buffer does not take the place
+    /// of the last one freed.
+    async fn read_back_with<R>(
+        &self,
+        mut encoder: wgpu::CommandEncoder,
+        source: &wgpu::Buffer,
+        offset: u64,
+        size: u64,
+        spacer: bool,
+        read: impl FnOnce(&[u8]) -> R,
+    ) -> R {
+        let staging_buffer = || {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("staging"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let _spacer = spacer.then(staging_buffer);
+        let staging = staging_buffer();
         encoder.copy_buffer_to_buffer(source, offset, &staging, 0, size);
-        self.queue.submit([encoder.finish()]);
+        self.queue
+            .submit(std::iter::once(encoder.finish()).chain(self.host_read_barrier(&staging)));
         // A failed mapping is reported by `get_mapped_range`
         let (mapped, on_mapped) = futures_channel::oneshot::channel();
         staging.map_async(wgpu::MapMode::Read, .., move |_| {
@@ -594,12 +628,70 @@ impl WgpuAccelerated {
         on_mapped
             .await
             .expect("the GPU dropped the mapping callback");
-        let data = staging
+        let view = staging
             .get_mapped_range(..)
-            .expect("mapping the GPU buffer failed")
-            .to_vec();
+            .expect("mapping the GPU buffer failed");
+        let result = read(&view[..]);
+        drop(view);
         staging.unmap();
-        data
+        result
+    }
+
+    /// A command buffer making the copy into `staging` visible to the host:
+    /// a TRANSFER_WRITE -> HOST_READ barrier, which wgpu does not record
+    /// before mapping. Without it the Jetson's GPU has not written the copy
+    /// back from its cache yet when the buffer gets mapped, and the CPU reads
+    /// whatever an earlier staging buffer left there. Recorded on an encoder
+    /// of its own, since wgpu does not let raw commands share one with its
+    /// own. `None` when the adapter is not a Vulkan one.
+    #[cfg(any(windows, target_os = "linux", target_os = "android"))]
+    fn host_read_barrier(&self, staging: &wgpu::Buffer) -> Option<wgpu::CommandBuffer> {
+        use wgpu::{
+            hal::{BufferBarrier, CommandEncoder as _, StateTransition, api::Vulkan},
+            wgt::BufferUses,
+        };
+
+        let mut encoder = self.encoder();
+        {
+            // SAFETY: the buffer is only named in a barrier, never destroyed
+            let staging = unsafe { staging.as_hal::<Vulkan>() }?;
+            // SAFETY: the barrier is all the encoder records, and nothing
+            // else touches it meanwhile
+            let recorded = unsafe {
+                encoder.as_hal_mut::<Vulkan, _, _>(|hal_encoder| {
+                    hal_encoder.map(|hal_encoder| {
+                        hal_encoder.transition_buffers(std::iter::once(BufferBarrier {
+                            buffer: &*staging,
+                            usage: StateTransition {
+                                from: BufferUses::COPY_DST,
+                                to: BufferUses::MAP_READ,
+                            },
+                        }));
+                    })
+                })
+            };
+            recorded?;
+        }
+        Some(encoder.finish())
+    }
+
+    /// Only Vulkan needs the barrier (see above), and only there can it be
+    /// recorded.
+    #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+    fn host_read_barrier(&self, _staging: &wgpu::Buffer) -> Option<wgpu::CommandBuffer> {
+        None
+    }
+
+    /// Remembers a count read back for debug reports: a block read back with
+    /// one of them as a coordinate is a stale read of an earlier staging
+    /// buffer.
+    fn note_count(&mut self, count: u32) {
+        if self.debug {
+            if self.recent_counts.len() == RECENT_COUNTS {
+                self.recent_counts.remove(0);
+            }
+            self.recent_counts.push(count);
+        }
     }
 
     async fn read_words(
@@ -691,22 +783,78 @@ impl WgpuAccelerated {
                 .join(", ")
         );
 
-        let len_again = self.read_words(self.encoder(), &self.output, 0, 1).await[0];
-        let again = bytemuck::pod_collect_to_vec::<u8, [u32; 4]>(
-            &self
-                .read_back(
-                    self.encoder(),
-                    &self.output,
-                    OUTPUT_HEADER_BYTES,
-                    len * POINT_BYTES,
-                )
-                .await,
+        // A misaligned x equal to a count read just before means the bytes
+        // came from an earlier staging buffer at the same place
+        let _ = writeln!(
+            out,
+            "  recent counts read back {:?}, misaligned x among them {:?}",
+            self.recent_counts,
+            misaligned
+                .iter()
+                .map(|(_, block)| block[0])
+                .filter(|x| self.recent_counts.contains(x))
+                .collect::<Vec<_>>(),
         );
         let _ = writeln!(
             out,
-            "  read again: len {len_again}, {} of {len} blocks differ",
-            blocks.iter().zip(&again).filter(|(a, b)| a != b).count()
+            "  first words {:?}",
+            blocks
+                .iter()
+                .take(4)
+                .flatten()
+                .map(|&w| w as i32)
+                .collect::<Vec<_>>(),
         );
+
+        // The output is read again three ways: like before (the staging
+        // buffer most likely where the last one was), the same bytes after
+        // the CPU cache lines were invalidated (aarch64) and through a
+        // staging buffer somewhere else. Which of them comes out right tells
+        // a stale CPU cache from memory the GPU had not written yet.
+        let compare = |data: &[u8]| {
+            let again = bytemuck::pod_collect_to_vec::<u8, [u32; 4]>(data);
+            format!(
+                "{} of {len} blocks differ, {} off the grid, first {}",
+                blocks.iter().zip(&again).filter(|(a, b)| a != b).count(),
+                again.iter().filter(|block| off_block_grid(block)).count(),
+                again.first().map_or_else(String::new, |&b| block(b)),
+            )
+        };
+        let read = |data: &[u8]| {
+            let cached = compare(data);
+            let uncached = invalidate_cpu_cache(data).then(|| compare(data));
+            (cached, uncached)
+        };
+        let size = len * POINT_BYTES;
+        let len_again = self.read_words(self.encoder(), &self.output, 0, 1).await[0];
+        let (same_place, invalidated) = self
+            .read_back_with(
+                self.encoder(),
+                &self.output,
+                OUTPUT_HEADER_BYTES,
+                size,
+                false,
+                read,
+            )
+            .await;
+        let (elsewhere, _) = self
+            .read_back_with(
+                self.encoder(),
+                &self.output,
+                OUTPUT_HEADER_BYTES,
+                size,
+                true,
+                read,
+            )
+            .await;
+        let _ = writeln!(out, "  read again: len {len_again}");
+        let _ = writeln!(out, "    same staging place: {same_place}");
+        let _ = writeln!(
+            out,
+            "    after invalidating the CPU cache: {}",
+            invalidated.as_deref().unwrap_or("not on this architecture")
+        );
+        let _ = writeln!(out, "    other staging place: {elsewhere}");
 
         let p = self
             .read_words(self.encoder(), &self.params, 0, PARAMS_BYTES / 4)
@@ -779,6 +927,36 @@ impl WgpuAccelerated {
     }
 }
 
+/// Cleans and invalidates the CPU data cache lines holding `data`, so that
+/// it is read from memory next. Returns whether it did: only on aarch64,
+/// where Linux lets user space maintain the cache (`SCTLR_EL1.UCI`).
+fn invalidate_cpu_cache(data: &[u8]) -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ctr: u64;
+        // SAFETY: reads a register
+        unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+        // DminLine: log2 of the words in the smallest data cache line
+        let line = 4usize << ((ctr >> 16) & 0xf);
+        let end = data.as_ptr() as usize + data.len();
+        let mut address = data.as_ptr() as usize & !(line - 1);
+        while address < end {
+            // SAFETY: the CPU only reads mapped readback memory, so no line
+            // is dirty and writing lines back loses nothing
+            unsafe { core::arch::asm!("dc civac, {}", in(reg) address, options(nostack)) };
+            address += line;
+        }
+        // SAFETY: a barrier, ordering the maintenance before the reads
+        unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+        true
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = data;
+        false
+    }
+}
+
 /// Whether a compress mode output `[x, y, z, mask]` is off the 4x4x2 block
 /// grid the renderer's tesselator takes. `collect` writes only block origins.
 fn off_block_grid(&[x, y, z, _]: &[u32; 4]) -> bool {
@@ -791,7 +969,7 @@ mod test {
 
     use super::{
         BITS_FOR_ENTRY_VOXEL_COUNT, BUCKET_BYTES, BUCKET_SIZE, ENTRY_BYTES, ENTRY_VOXEL_COUNT,
-        Kernel, VOXEL_BYTES, WgpuAccelerated, off_block_grid,
+        Kernel, VOXEL_BYTES, WgpuAccelerated, invalidate_cpu_cache, off_block_grid,
     };
     use crate::{
         Multipliers, Voxelizer, VoxelizerParams,
@@ -1326,5 +1504,33 @@ mod test {
             0,
             altered,
         ));
+    }
+
+    #[test]
+    fn invalidate_cpu_cache_keeps_data() {
+        // Unaligned on both ends, so the first and last lines are partial
+        let data: Vec<u8> = (0..1000).map(|n| n as u8).collect();
+        let slice = &data[3..997];
+        assert_eq!(invalidate_cpu_cache(slice), cfg!(target_arch = "aarch64"));
+        assert!(slice.iter().zip(3..).all(|(&b, n)| b == n as u8));
+    }
+
+    #[test]
+    fn host_read_barrier_recorded_on_vulkan() {
+        // Readbacks on the Jetson rely on it, so it must not quietly record
+        // nothing
+        let v = new(1.0, 1, 1, 0, 1, false, TEST_BUCKETS);
+        let staging = v.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let barrier = v.host_read_barrier(&staging);
+        assert_eq!(
+            barrier.is_some(),
+            v.adapter_info.backend == wgpu::Backend::Vulkan
+        );
+        v.queue.submit(barrier);
     }
 }
