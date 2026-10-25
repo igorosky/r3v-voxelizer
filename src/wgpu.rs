@@ -24,6 +24,12 @@ const PARAMS_BYTES: u64 = 16 * 4;
 const POINT_BYTES: u64 = 16;
 /// Capacity (in points) the input and output buffers start with
 const INITIAL_CAPACITY: u64 = 1024;
+/// Environment variable turning on the diagnostics printed to stderr
+const DEBUG_ENV: &str = "R3V_VOXELIZER_DEBUG";
+/// Misaligned outputs reported per voxelizer in debug mode
+const MAX_DEBUG_REPORTS: u32 = 3;
+/// Blocks and entries a debug report lists
+const DEBUG_REPORT_ITEMS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 enum Kernel {
@@ -63,6 +69,10 @@ impl Kernel {
 /// (see [`WgpuAccelerated::memory_size`]). Values of pages that do not fit
 /// anymore are dropped. Pages whose voxels all drop to 0 during a call are
 /// removed at its end, freeing their space.
+///
+/// With `R3V_VOXELIZER_DEBUG` set in the environment it prints the adapter
+/// it runs on and, in compress mode, a report of the GPU state whenever
+/// blocks come back off the 4x4x2 block grid, to stderr.
 #[derive(Debug)]
 pub struct WgpuAccelerated {
     device: wgpu::Device,
@@ -76,8 +86,8 @@ pub struct WgpuAccelerated {
     altered: wgpu::Buffer,
     output: wgpu::Buffer,
     emptied: wgpu::Buffer,
-    // Used through `storage_bind_group`, the fields are read back by the tests
-    #[cfg_attr(not(test), expect(dead_code))]
+    // Used through `storage_bind_group`, read back by the tests and debug
+    // reports
     buckets: wgpu::Buffer,
     #[cfg_attr(not(test), expect(dead_code))]
     voxels: wgpu::Buffer,
@@ -89,6 +99,10 @@ pub struct WgpuAccelerated {
     construct_threshold: u32,
     max_value: u32,
     compress: bool,
+    /// `R3V_VOXELIZER_DEBUG` was set when it was created
+    debug: bool,
+    adapter_info: wgpu::AdapterInfo,
+    debug_reports: u32,
 }
 
 impl Voxelizer for WgpuAccelerated {
@@ -175,16 +189,22 @@ impl WgpuAccelerated {
                         u64::from(len) * POINT_BYTES,
                     )
                     .await;
-                result.extend(
-                    bytemuck::pod_collect_to_vec::<u8, [u32; 4]>(&data)
-                        .into_iter()
-                        .map(|[x, y, z, i]| PointI {
-                            x: x as i32,
-                            y: y as i32,
-                            z: z as i32,
-                            i,
-                        }),
-                );
+                let blocks = bytemuck::pod_collect_to_vec::<u8, [u32; 4]>(&data);
+                if self.compress
+                    && self.debug
+                    && self.debug_reports < MAX_DEBUG_REPORTS
+                    && blocks.iter().any(off_block_grid)
+                {
+                    self.debug_reports += 1;
+                    self.report_misaligned(camera, points.len(), &blocks, altered, first, count)
+                        .await;
+                }
+                result.extend(blocks.into_iter().map(|[x, y, z, i]| PointI {
+                    x: x as i32,
+                    y: y as i32,
+                    z: z as i32,
+                    i,
+                }));
             }
         }
         result
@@ -207,6 +227,12 @@ impl WgpuAccelerated {
     /// shaders, `bucket_count` is 0 or the hashmap does not fit the adapter's
     /// limits.
     pub async fn new(params: VoxelizerParams, bucket_count: u32) -> Option<Self> {
+        Self::with_debug(params, bucket_count, std::env::var_os(DEBUG_ENV).is_some()).await
+    }
+
+    /// [`WgpuAccelerated::new`] with the diagnostics on or off whatever the
+    /// environment says.
+    async fn with_debug(params: VoxelizerParams, bucket_count: u32, debug: bool) -> Option<Self> {
         let VoxelizerParams {
             resolution,
             multipliers,
@@ -237,6 +263,7 @@ impl WgpuAccelerated {
         {
             return None;
         }
+        let adapter_info = adapter.get_info();
         let adapter_limits = adapter.limits();
         let max_binding_size = adapter_limits
             .max_storage_buffer_binding_size
@@ -246,7 +273,7 @@ impl WgpuAccelerated {
         }
         let has_uma = {
             use wgpu::DeviceType;
-            match adapter.get_info().device_type {
+            match adapter_info.device_type {
                 DeviceType::Cpu | DeviceType::IntegratedGpu => true,
                 DeviceType::DiscreteGpu | DeviceType::VirtualGpu | DeviceType::Other => false,
             }
@@ -330,7 +357,13 @@ impl WgpuAccelerated {
                 mapped_at_creation: false,
             })
         };
-        let params = buffer("params", PARAMS_BYTES, Usage::UNIFORM | Usage::COPY_DST);
+        // Debug reports read the params back
+        let params_usage = if debug {
+            Usage::UNIFORM | Usage::COPY_DST | Usage::COPY_SRC
+        } else {
+            Usage::UNIFORM | Usage::COPY_DST
+        };
+        let params = buffer("params", PARAMS_BYTES, params_usage);
         let input = Self::input_buffer(&device, INITIAL_CAPACITY);
         let output = Self::output_buffer(&device, INITIAL_CAPACITY);
         let readable = Usage::STORAGE | Usage::COPY_SRC | Usage::COPY_DST;
@@ -357,6 +390,20 @@ impl WgpuAccelerated {
             ],
         });
         let device_limits = device.limits();
+        if debug {
+            eprintln!(
+                "r3v-voxelizer wgpu: adapter {:?} ({:?}, {:?}), driver {:?} {:?}, uma {has_uma}, \
+                 max_storage_buffer_binding_size {}, max_buffer_size {}, \
+                 buffers: buckets {buckets_size} B, voxels {voxels_size} B, lists {list_size} B",
+                adapter_info.name,
+                adapter_info.backend,
+                adapter_info.device_type,
+                adapter_info.driver,
+                adapter_info.driver_info,
+                device_limits.max_storage_buffer_binding_size,
+                device_limits.max_buffer_size,
+            );
+        }
         Some(Self {
             max_binding_size: device_limits
                 .max_storage_buffer_binding_size
@@ -381,6 +428,9 @@ impl WgpuAccelerated {
             construct_threshold,
             max_value,
             compress,
+            debug,
+            adapter_info,
+            debug_reports: 0,
         })
     }
 
@@ -561,6 +611,178 @@ impl WgpuAccelerated {
     ) -> Vec<u32> {
         bytemuck::pod_collect_to_vec(&self.read_back(encoder, source, offset, count * 4).await)
     }
+
+    /// Prints the state behind `blocks`, the output of one `collect` chunk
+    /// some of which is off the block grid, which `collect` never writes in
+    /// compress mode: what was read back and whether reading it again gives
+    /// the same, the params the GPU got and the first altered entries of the
+    /// chunk.
+    async fn report_misaligned(
+        &self,
+        camera: [f32; 3],
+        point_count: usize,
+        blocks: &[[u32; 4]],
+        altered: u32,
+        first: u32,
+        count: u32,
+    ) {
+        use std::fmt::Write;
+
+        let block =
+            |[x, y, z, i]: [u32; 4]| format!("({}, {}, {}, i {i})", x as i32, y as i32, z as i32);
+        let misaligned: Vec<_> = blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| off_block_grid(block))
+            .collect();
+        let len = blocks.len() as u64;
+        let sensor = camera.map(|c| (c / self.resolution).floor() as i32);
+        // Writing to a String does not fail
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "r3v-voxelizer wgpu: {} of {len} blocks off the 4x4x2 grid in compress mode",
+            misaligned.len()
+        );
+        let _ = writeln!(
+            out,
+            "  adapter {:?} ({:?}, {:?}), driver {:?} {:?}",
+            self.adapter_info.name,
+            self.adapter_info.backend,
+            self.adapter_info.device_type,
+            self.adapter_info.driver,
+            self.adapter_info.driver_info,
+        );
+        let _ = writeln!(
+            out,
+            "  {point_count} points, sensor at voxel {sensor:?}; altered {altered}, chunk first {first} count {count}, \
+             at most {} blocks, output capacity {} blocks",
+            u64::from(count) * 2,
+            (self.output.size() - OUTPUT_HEADER_BYTES) / POINT_BYTES,
+        );
+        let _ = writeln!(
+            out,
+            "  i: max {}, {} of {len} at most max_value {}",
+            blocks.iter().map(|block| block[3]).max().unwrap_or(0),
+            blocks
+                .iter()
+                .filter(|block| block[3] <= self.max_value)
+                .count(),
+            self.max_value,
+        );
+        let _ = writeln!(
+            out,
+            "  first blocks: {}",
+            blocks
+                .iter()
+                .take(DEBUG_REPORT_ITEMS)
+                .map(|&b| block(b))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let _ = writeln!(
+            out,
+            "  first misaligned: {}",
+            misaligned
+                .iter()
+                .take(DEBUG_REPORT_ITEMS)
+                .map(|&(k, &b)| format!("[{k}] {}", block(b)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+
+        let len_again = self.read_words(self.encoder(), &self.output, 0, 1).await[0];
+        let again = bytemuck::pod_collect_to_vec::<u8, [u32; 4]>(
+            &self
+                .read_back(
+                    self.encoder(),
+                    &self.output,
+                    OUTPUT_HEADER_BYTES,
+                    len * POINT_BYTES,
+                )
+                .await,
+        );
+        let _ = writeln!(
+            out,
+            "  read again: len {len_again}, {} of {len} blocks differ",
+            blocks.iter().zip(&again).filter(|(a, b)| a != b).count()
+        );
+
+        let p = self
+            .read_words(self.encoder(), &self.params, 0, PARAMS_BYTES / 4)
+            .await;
+        let f = f32::from_bits;
+        let _ = writeln!(
+            out,
+            "  params read back: camera ({}, {}, {}), resolution {}, hit {}, target {}, destroy {}, \
+             construct {}, count {}, first {}, compress {}, max_value {}, intensity {}, padding {:?}",
+            f(p[0]),
+            f(p[1]),
+            f(p[2]),
+            f(p[3]),
+            p[4],
+            p[5],
+            p[6],
+            p[7],
+            p[8],
+            p[9],
+            p[10],
+            p[11],
+            f(p[12]),
+            &p[13..],
+        );
+
+        let shown = count.min(DEBUG_REPORT_ITEMS as u32);
+        let ids = self
+            .read_words(
+                self.encoder(),
+                &self.altered,
+                ENTRY_LIST_HEADER_BYTES + u64::from(first) * 4,
+                u64::from(shown),
+            )
+            .await;
+        let entry_count = self.buckets.size() / ENTRY_BYTES;
+        // Shifting left restores the voxel coordinates and drops KEY_SET
+        let origin = |key: u32| (key << BITS_FOR_ENTRY_VOXEL_COUNT) as i32;
+        for id in ids {
+            if u64::from(id) >= entry_count {
+                let _ = writeln!(
+                    out,
+                    "  altered entry {id}: out of range ({entry_count} entries)"
+                );
+                continue;
+            }
+            let w = self
+                .read_words(
+                    self.encoder(),
+                    &self.buckets,
+                    u64::from(id) * ENTRY_BYTES,
+                    ENTRY_BYTES / 4,
+                )
+                .await;
+            let _ = writeln!(
+                out,
+                "  altered entry {id}: key {:#010x} {:#010x} {:#010x} -> origin ({}, {}, {}), flags {}, \
+                 occupancy {:#010x} {:#010x}",
+                w[0],
+                w[1],
+                w[2],
+                origin(w[0]),
+                origin(w[1]),
+                origin(w[2]),
+                w[3],
+                w[4],
+                w[5],
+            );
+        }
+        eprint!("{out}");
+    }
+}
+
+/// Whether a compress mode output `[x, y, z, mask]` is off the 4x4x2 block
+/// grid the renderer's tesselator takes. `collect` writes only block origins.
+fn off_block_grid(&[x, y, z, _]: &[u32; 4]) -> bool {
+    x % 4 != 0 || y % 4 != 0 || z % 2 != 0
 }
 
 #[cfg(test)]
@@ -569,7 +791,7 @@ mod test {
 
     use super::{
         BITS_FOR_ENTRY_VOXEL_COUNT, BUCKET_BYTES, BUCKET_SIZE, ENTRY_BYTES, ENTRY_VOXEL_COUNT,
-        Kernel, VOXEL_BYTES, WgpuAccelerated,
+        Kernel, VOXEL_BYTES, WgpuAccelerated, off_block_grid,
     };
     use crate::{
         Multipliers, Voxelizer, VoxelizerParams,
@@ -1059,5 +1281,50 @@ mod test {
             assert_eq!(from_above(&mut v, (x, y, z), 1.0), vec![pi(x, y, z, 1)]);
         }
         assert_eq!(v.pages().len(), entries);
+    }
+
+    // ------------------------------------------------------------ debug
+
+    #[test]
+    fn debug_report_reads_valid_ranges() {
+        // Compress output is on the block grid, so the report is fed made up
+        // blocks after a real call: every range it reads back must be valid,
+        // or wgpu panics just when the report is needed.
+        let params = VoxelizerParams {
+            resolution: 1.0,
+            multipliers: Multipliers {
+                intensity: 1.0,
+                hit: 1,
+                target: 1,
+            },
+            destroy_threshold: 0,
+            construct_threshold: 1,
+            max_value: u32::MAX,
+            compress: true,
+        };
+        let mut v = pollster::block_on(WgpuAccelerated::with_debug(params, TEST_BUCKETS, true))
+            .expect("a GPU adapter with compute shaders is required");
+        let points: Vec<_> = cube_faces(40, 32, 8)
+            .iter()
+            .map(|&(x, y, z)| pf(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, 1.0))
+            .collect();
+        let result = v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+        assert!(!result.is_empty());
+        assert!(
+            !result
+                .iter()
+                .any(|b| off_block_grid(&[b.x as u32, b.y as u32, b.z as u32, b.i]))
+        );
+        let altered = pollster::block_on(v.read_words(v.encoder(), &v.altered, 0, 1))[0];
+        assert!(altered > 0);
+        let blocks = [[1, 0, 0, 5], [4, 4, 2, 1]];
+        pollster::block_on(v.report_misaligned(
+            [0.5; 3],
+            points.len(),
+            &blocks,
+            altered,
+            0,
+            altered,
+        ));
     }
 }
