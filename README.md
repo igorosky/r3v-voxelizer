@@ -42,6 +42,8 @@ then you can build the JavaScript code using the following command:
 wasm-pack build --release --target web --features=js
 ```
 
+The build also generates the TypeScript types (`r3v_voxelizer.d.ts`).
+
 Integer arguments (the voxelizer constructor parameters) and the `PointI` fields are converted the way wasm-bindgen converts every integer: out of range or fractional values are wrapped and truncated instead of rejected. For example `-1` passed as an unsigned value becomes `4294967295` and `1.9` becomes `1`.
 
 Multi-threaded voxelizer is not supported in the JavaScript build.

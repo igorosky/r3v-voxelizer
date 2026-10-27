@@ -31,6 +31,13 @@ impl PointI {
 }
 
 #[cfg(any(feature = "single_threaded", feature = "wgpu"))]
+#[wasm_bindgen(typescript_custom_section)]
+const TYPES: &str = r#"
+/** A point `add_points` takes: a `PointF` or a plain object. */
+export interface PointFLike { x: number; y: number; z: number; i: number }
+"#;
+
+#[cfg(any(feature = "single_threaded", feature = "wgpu"))]
 fn points_from_js(value: &wasm_bindgen::JsValue) -> Result<Vec<PointF>, wasm_bindgen::JsError> {
     use wasm_bindgen::{JsCast, JsError, JsValue};
     if !value.is_array() {
@@ -102,7 +109,7 @@ mod st {
         pub fn add_points(
             &mut self,
             sensor_pos: &PointF,
-            points: JsValue,
+            #[wasm_bindgen(unchecked_param_type = "PointFLike[]")] points: JsValue,
         ) -> Result<Vec<PointI>, JsError> {
             Ok(self
                 .0
@@ -184,7 +191,7 @@ mod gpu {
         pub async fn add_points(
             &self,
             sensor_pos: &PointF,
-            points: JsValue,
+            #[wasm_bindgen(unchecked_param_type = "PointFLike[]")] points: JsValue,
         ) -> Result<Vec<PointI>, JsError> {
             let points = points_from_js(&points)?;
             let mut voxelizer = self.0.take().ok_or_else(|| {
