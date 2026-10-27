@@ -6,26 +6,31 @@ the C binding tests in tests/c/voxelizer_tests.c.
 Per implementation cases run against every entry of IMPLS (harness.py).
 """
 
+import ast
 import gc
+import inspect
 import sys
+from pathlib import Path
 
 import r3v_voxelizer as rv
 
 from harness import (
     CLASS_OF_FEATURE, FEATURES, SCENARIO_PARAMS, SEED, SINGLE, WGPU, WGPU_TEST_BUCKETS, add_point, along_x, block,
-    block_bit, check, check_ray, check_update, compressed, coords, expect_no_voxels, expect_voxels, from_above, main,
-    make, multi_threaded, pf, pi, plain, raises, scenario, seed, sensor,
+    block_bit, check, check_ray, check_update, compressed, coords, expect_no_voxels, expect_voxels, fail, from_above,
+    main, make, multi_threaded, pf, pi, plain, raises, scenario, seed, sensor,
 )
 
 U32_MAX = 2**32 - 1
 
 # ------------------------------------------------------------ Python API
 
+# Classes the module has whatever features it is built with.
+VALUE_CLASSES = ["Multipliers", "PointF", "PointI"]
+
 
 def enabled_classes():
     """Names of the classes the module must have with the enabled features."""
-    return ["Multipliers", "PointF", "PointI"] + [cls for feature, cls in CLASS_OF_FEATURE.items()
-                                                  if feature in FEATURES]
+    return VALUE_CLASSES + [cls for feature, cls in CLASS_OF_FEATURE.items() if feature in FEATURES]
 
 
 def module_exports_match_features():
@@ -40,6 +45,128 @@ def classes_belong_to_module():
     for cls in (getattr(rv, name) for name in enabled_classes()):
         check(cls.__module__ == "r3v_voxelizer",
               f"{cls.__name__}.__module__ is {cls.__module__!r}, expected 'r3v_voxelizer'")
+
+
+STUB = Path(__file__).resolve().parents[2] / "bindings" / "r3v_voxelizer.pyi"
+
+# Dunder methods telling type checkers what a class supports: the stub has to
+# declare exactly those the class has.
+PROTOCOL_DUNDERS = {"__new__", "__len__", "__getitem__", "__iter__", "__contains__", "__call__"}
+
+# Py_TPFLAGS_BASETYPE, set for classes that can be subclassed.
+BASETYPE = 1 << 10
+
+
+def stub_members(node):
+    """{name: kind} of the class `node` of the stub, kind being "property",
+    "method" or "staticmethod", and whether it declares `__hash__` None."""
+    members = {}
+    unhashable = False
+    for item in node.body:
+        if isinstance(item, ast.AnnAssign) and item.target.id == "__hash__":
+            unhashable = True
+        elif isinstance(item, ast.AnnAssign):
+            members[item.target.id] = "property"
+        elif isinstance(item, ast.FunctionDef):
+            decorators = [ast.unparse(decorator) for decorator in item.decorator_list]
+            if decorators == [f"{item.name}.setter"]:
+                check(members.get(item.name) == "property", f"{node.name}.{item.name} has a setter, no getter")
+            elif decorators in (["property"], ["staticmethod"]):
+                members[item.name] = decorators[0]
+            else:
+                check(decorators == [], f"{node.name}.{item.name} is decorated with {decorators}")
+                members[item.name] = "method"
+        else:
+            fail(f"{node.name} has {ast.unparse(item)!r} in the stub")
+    return members, unhashable
+
+
+def runtime_members(cls):
+    """{name: kind} of `cls`, as stub_members gives them."""
+    members = {}
+    for name, value in vars(cls).items():
+        if name.startswith("_") and name not in PROTOCOL_DUNDERS:
+            continue
+        if isinstance(value, staticmethod):
+            members[name] = "staticmethod"
+        elif inspect.isdatadescriptor(value):
+            members[name] = "property"
+        else:
+            members[name] = "method"
+    # iter() falls back on __getitem__; the stub has to say so with __iter__,
+    # type checkers such as mypy do not know the fallback.
+    if "__getitem__" in members:
+        members.setdefault("__iter__", "method")
+    return members
+
+
+def stub_parameters(function):
+    """(name, kind, default) of every parameter of `function` in the stub,
+    without self or cls."""
+    args = function.args
+    check(args.vararg is None and args.kwarg is None and not args.kwonlyargs,
+          f"{function.name} has * or ** parameters in the stub")
+    names = [arg.arg for arg in args.posonlyargs + args.args]
+    kinds = ([inspect.Parameter.POSITIONAL_ONLY.description] * len(args.posonlyargs)
+             + [inspect.Parameter.POSITIONAL_OR_KEYWORD.description] * len(args.args))
+    defaults = [None] * (len(names) - len(args.defaults)) + [ast.unparse(default) for default in args.defaults]
+    parameters = list(zip(names, kinds, defaults))
+    static = [ast.unparse(decorator) for decorator in function.decorator_list] == ["staticmethod"]
+    return parameters if static else parameters[1:]
+
+
+def runtime_parameters(cls, name, kind):
+    """(name, kind, default) of every parameter of `cls.name`, without self."""
+    if name == "__new__":
+        parameters = list(inspect.signature(cls).parameters.values())
+    else:
+        parameters = list(inspect.signature(getattr(cls, name)).parameters.values())
+        if kind == "method":
+            parameters = parameters[1:]
+
+    def default(parameter):
+        if parameter.default is inspect.Parameter.empty:
+            return None
+        return "..." if parameter.default is Ellipsis else repr(parameter.default)
+
+    return [(parameter.name, parameter.kind.description, default(parameter)) for parameter in parameters]
+
+
+def stub_matches_module():
+    """The stub describes the module built with every feature: it has the
+    classes of every feature, those of the enabled ones are compared."""
+    tree = ast.parse(STUB.read_text(encoding="utf-8"), str(STUB))
+    public = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        name = node.target.id if isinstance(node, ast.AnnAssign) else getattr(node, "name", None)
+        check(name is not None, f"the stub has {ast.unparse(node)!r}")
+        if not name.startswith("_"):
+            public[name] = node
+    every_class = VALUE_CLASSES + list(CLASS_OF_FEATURE.values())
+    check(sorted(public) == sorted(every_class), f"{sorted(public.keys() - set(every_class))} are only in the "
+          f"stub, {sorted(set(every_class) - public.keys())} are missing from it")
+
+    for name in enabled_classes():
+        node, cls = public[name], getattr(rv, name)
+        check(isinstance(node, ast.ClassDef), f"{name} is no class in the stub")
+        final = [ast.unparse(decorator) for decorator in node.decorator_list] == ["final"]
+        check(final == (not cls.__flags__ & BASETYPE), f"{name} is final in the stub: {final}")
+        members, unhashable = stub_members(node)
+        check(unhashable == (cls.__hash__ is None), f"{name} is unhashable in the stub: {unhashable}")
+        expected = runtime_members(cls)
+        check(members == expected, f"{name} has {sorted(members.items() - expected.items())} only in the stub, "
+              f"{sorted(expected.items() - members.items())} only in the module")
+
+        functions = {item.name: item for item in node.body if isinstance(item, ast.FunctionDef)}
+        for member, kind in members.items():
+            # Only the stub has the __iter__ that runtime_members adds.
+            if kind == "property" or member not in vars(cls):
+                continue
+            got = stub_parameters(functions[member])
+            expected = runtime_parameters(cls, member, kind)
+            check(got == expected, f"{name}.{member} takes {got} in the stub, {expected} in the module")
 
 
 def point_f_positional():
@@ -873,6 +1000,7 @@ def once(fn, *needs):
 TEST_CASES = [
     once(module_exports_match_features),
     once(classes_belong_to_module),
+    once(stub_matches_module),
     once(point_f_positional),
     once(point_f_keywords),
     once(point_f_from_ints),

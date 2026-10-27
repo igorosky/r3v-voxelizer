@@ -28,7 +28,7 @@ Then you can use the generated `.so` file in your Python code by importing it as
 
 With `--features python,wgpu` the module also has `WgpuAccelerated`, the GPU voxelizer. Its constructor takes the usual arguments plus `bucket_count` (see C/C++ above, `WgpuAccelerated.memory_size(bucket_count)` gives the GPU memory it takes) and raises `RuntimeError` when no GPU voxelizer can be created.
 
-Currently there is no stubs for the Python code.
+Type stubs for type checkers and IDEs are in `bindings/r3v_voxelizer.pyi`, put the file next to the module's `.so` file. They describe the module built with every voxelizer feature, the classes of features left out are missing at runtime.
 
 ## JavaScript
 
