@@ -28,7 +28,7 @@ Then you can use the generated `.so` file in your Python code by importing it as
 
 With `--features python,wgpu` the module also has `WgpuAccelerated`, the GPU voxelizer. Its constructor takes the usual arguments plus `bucket_count` (see C/C++ above, `WgpuAccelerated.memory_size(bucket_count)` gives the GPU memory it takes) and raises `RuntimeError` when no GPU voxelizer can be created.
 
-Currently there is no stubs for the Python code.
+Type stubs for type checkers and IDEs are in `bindings/r3v_voxelizer.pyi`, put the file next to the module's `.so` file. They describe the module built with every voxelizer feature, the classes of features left out are missing at runtime.
 
 ## JavaScript
 
@@ -41,6 +41,8 @@ then you can build the JavaScript code using the following command:
 ```bash
 wasm-pack build --release --target web --features=js
 ```
+
+The build also generates the TypeScript types (`r3v_voxelizer.d.ts`).
 
 Integer arguments (the voxelizer constructor parameters) and the `PointI` fields are converted the way wasm-bindgen converts every integer: out of range or fractional values are wrapped and truncated instead of rejected. For example `-1` passed as an unsigned value becomes `4294967295` and `1.9` becomes `1`.
 
