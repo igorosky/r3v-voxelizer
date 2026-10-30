@@ -1,7 +1,7 @@
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    Multipliers, Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -15,6 +15,8 @@ type HashMap<K, V> = hashbrown::HashMap<K, V, FxBuildHasher>;
 type HashSet<K> = hashbrown::HashSet<K, FxBuildHasher>;
 type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
+
+static_assertions::const_assert!(BITS_FOR_COMPRESSED_ZORDER == ALL_POINTS_GROUP_EDGE_BITS);
 
 #[derive(Debug, Clone)]
 pub struct SingleThreaded {
@@ -174,6 +176,34 @@ impl Voxelizer for SingleThreaded {
     #[inline]
     fn set_multipliers(&mut self, multipliers: Multipliers) {
         self.multipliers = multipliers;
+    }
+    fn get_all_points(&self) -> Vec<PointI> {
+        self.voxels
+            .iter()
+            .flat_map(|(p, v)| {
+                v.iter()
+                    .enumerate()
+                    .map(|(i, v)| self.point_from_index((*p, i), *v))
+            })
+            .collect()
+    }
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+        if let Some(compressed) = self.compressed_voxels.as_ref() {
+            compressed
+                .into_iter()
+                .map(|((x, y, z), v)| CompressedVoxelGroup {
+                    point: PointI {
+                        x: *x,
+                        y: *y,
+                        z: *z,
+                        i: 0,
+                    },
+                    values: (*v).into(),
+                })
+                .collect()
+        } else {
+            todo!()
+        }
     }
     #[inline]
     fn multipliers(&self) -> Multipliers {

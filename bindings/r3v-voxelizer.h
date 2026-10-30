@@ -6,6 +6,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/**
+ * Count of bits that encode one coordinate in all points group
+ */
+#define ALL_POINTS_GROUP_EDGE_BITS 4
+
 typedef struct PointI {
   int32_t x;
   int32_t y;

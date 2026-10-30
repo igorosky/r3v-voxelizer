@@ -9,6 +9,9 @@
 namespace r3v {
 namespace voxelizer {
 
+/// Count of bits that encode one coordinate in all points group
+constexpr static const uint32_t ALL_POINTS_GROUP_EDGE_BITS = 4;
+
 struct PointI {
   int32_t x;
   int32_t y;
