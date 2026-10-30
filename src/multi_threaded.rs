@@ -5,7 +5,8 @@ use rayon::{
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    Multipliers, Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -19,6 +20,8 @@ type DashMap<K, V> = dashmap::DashMap<K, V, FxBuildHasher>;
 type DashSet<K> = dashmap::DashSet<K, FxBuildHasher>;
 type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
+
+static_assertions::const_assert!(BITS_FOR_COMPRESSED_ZORDER == ALL_POINTS_GROUP_EDGE_BITS);
 
 #[derive(Debug)]
 pub struct MultiThreaded {
@@ -145,7 +148,7 @@ impl Voxelizer for MultiThreaded {
                             idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
                         )
                     };
-                    let bit: u64 = 1 << x << (y << 2) << (z << 4);
+                    let bit = Self::word_bit([x, y, z]);
                     // A voxel between the thresholds keeps its state, so a
                     // crossing changes it only when it is in the other one
                     if prev < self.construct_threshold && voxel >= self.construct_threshold {
@@ -183,6 +186,67 @@ impl Voxelizer for MultiThreaded {
     #[inline]
     fn set_multipliers(&mut self, multipliers: Multipliers) {
         self.multipliers = multipliers;
+    }
+    fn get_all_points(&self) -> Vec<PointI> {
+        self.thread_pool.install(|| {
+            self.voxels
+                .iter()
+                .par_bridge()
+                .flat_map_iter(|page| {
+                    let (p, values) = (*page.key(), *page.value());
+                    values
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(_, v)| *v != 0)
+                        .map(move |(i, v)| self.point_from_index((p, i), v))
+                })
+                .collect()
+        })
+    }
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+        self.thread_pool.install(|| {
+            if let Some(compressed) = self.compressed_voxels.as_ref() {
+                compressed
+                    .iter()
+                    .par_bridge()
+                    .map(|group| {
+                        let (x, y, z) = *group.key();
+                        CompressedVoxelGroup {
+                            point: PointI { x, y, z, i: 0 },
+                            values: Box::new(*group.value()),
+                        }
+                    })
+                    .collect()
+            } else {
+                // Without compress there is no state between the thresholds,
+                // so a voxel counts as constructed once it reaches
+                // `construct_threshold`
+                let groups: DashMap<ThreeDim, Box<[u64; POINTS_IN_VOXEL_GROUP]>> =
+                    DashMap::default();
+                self.voxels.iter().par_bridge().for_each(|page| {
+                    let word = page
+                        .value()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v != 0 && **v >= self.construct_threshold)
+                        .fold(0, |word, (inner, _)| {
+                            word | Self::word_bit(self.zorder.coord_of(inner as u64))
+                        });
+                    if word != 0 {
+                        let (key, inner) = self.compressed_index(*page.key());
+                        groups.entry(key).or_insert_with(|| Box::new([0; _]))[inner] = word;
+                    }
+                });
+                groups
+                    .into_iter()
+                    .par_bridge()
+                    .map(|((x, y, z), values)| CompressedVoxelGroup {
+                        point: PointI { x, y, z, i: 0 },
+                        values,
+                    })
+                    .collect()
+            }
+        })
     }
     #[inline]
     fn multipliers(&self) -> Multipliers {
@@ -271,6 +335,11 @@ impl MultiThreaded {
                 (page.2 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
             ]) as usize,
         )
+    }
+    /// Bit of the voxel at `[x, y, z]` of a fine page in its compressed word.
+    #[inline]
+    fn word_bit([x, y, z]: [u16; 3]) -> u64 {
+        1 << x << (y << 2) << (z << 4)
     }
     /// Removes pages zeroed during the call that are empty (all voxels 0 and
     /// none constructed) and compressed pages from `emptied_compressed`

@@ -34,7 +34,13 @@ default = ["single_threaded"]
 c = ["dep:pollster", "dep:cbindgen"]
 cpp = ["dep:pollster", "dep:cbindgen"]
 js = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
-multi_threaded = ["dep:rayon", "dep:dashmap", "dep:rustc-hash", "dep:zorder"]
+multi_threaded = [
+    "dep:rayon",
+    "dep:dashmap",
+    "dep:rustc-hash",
+    "dep:zorder",
+    "dep:static_assertions",
+]
 python = ["dep:pyo3", "dep:pyo3-build-config"]
 single_threaded = [
     "dep:hashbrown",

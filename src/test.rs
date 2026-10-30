@@ -12,8 +12,11 @@
     feature = "wgpu"
 ))]
 
+use std::collections::BTreeMap;
+
 use crate::{
-    Multipliers, Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -273,6 +276,73 @@ pub(crate) fn along_x<T: TestVoxelizer>(
     )
 }
 
+// ------------------------------------------------------------ dump helpers
+
+/// Two calls from the origin: call 1 targets the faces of a cube of size
+/// 50 (intensities 1..=5), call 2 a cube of size 100 (intensities 1..=3)
+/// whose rays cross call 1 targets. Returns the sorted result of every call.
+pub(crate) fn workload<T: TestVoxelizer>(v: &mut T) -> Vec<Vec<PointI>> {
+    let sensor = pf(0.5, 0.5, 0.5, 1.0);
+    [(50, 20, 4, 5), (100, 40, 8, 3)]
+        .into_iter()
+        .map(|(dist, half, step, max_i)| {
+            let points: Vec<PointF> = cube_faces(dist, half, step)
+                .into_iter()
+                .enumerate()
+                .map(|(k, (x, y, z))| {
+                    let i = 1 + k as u32 % max_i;
+                    pf(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, i as f32)
+                })
+                .collect();
+            sorted(v.add_points(sensor.clone(), &points))
+        })
+        .collect()
+}
+/// Points of `points` with a non-zero value, sorted.
+pub(crate) fn nonzero(points: Vec<PointI>) -> Vec<PointI> {
+    sorted(points.into_iter().filter(|p| p.i != 0).collect())
+}
+/// `groups` sorted by their key.
+pub(crate) fn sorted_groups(mut groups: Vec<CompressedVoxelGroup>) -> Vec<CompressedVoxelGroup> {
+    groups.sort_by(|a, b| a.point.cmp(&b.point));
+    groups
+}
+/// Last value every voxel got in `results`, without the zeroed ones.
+pub(crate) fn replay(results: Vec<Vec<PointI>>) -> BTreeMap<Coord, u32> {
+    let mut out = BTreeMap::new();
+    for result in results {
+        out.extend(result.into_iter().map(|p| ((p.x, p.y, p.z), p.i)));
+    }
+    out.retain(|_, i| *i != 0);
+    out
+}
+/// Every voxel set in `groups`, with `i = 1`, sorted. A group holds one
+/// u64 word per fine page in Z-order, the bit of voxel `(x, y, z)` of the
+/// page is `x + 4 * y + 16 * z`.
+pub(crate) fn decode_groups(groups: &[CompressedVoxelGroup]) -> Vec<PointI> {
+    let zorder = ZOrder::default();
+    let mut out = Vec::new();
+    for group in groups {
+        for (inner, word) in group.values.iter().enumerate() {
+            let [px, py, pz] = zorder.coord_of(inner as u64);
+            let page = (
+                (group.point.x << ALL_POINTS_GROUP_EDGE_BITS) | px as i32,
+                (group.point.y << ALL_POINTS_GROUP_EDGE_BITS) | py as i32,
+                (group.point.z << ALL_POINTS_GROUP_EDGE_BITS) | pz as i32,
+            );
+            for bit in (0..64i32).filter(|bit| word & (1u64 << bit) != 0) {
+                out.push(pi(
+                    (page.0 << 2) | (bit & 3),
+                    (page.1 << 2) | ((bit >> 2) & 3),
+                    (page.2 << 2) | (bit >> 4),
+                    1,
+                ));
+            }
+        }
+    }
+    sorted(out)
+}
+
 // --------------------------------------------------------------- scenario
 //
 // A deterministic, schedule independent workload used to compare
@@ -354,6 +424,11 @@ pub(crate) struct Snapshot {
     pub(crate) results: Vec<Vec<PointI>>,
     pub(crate) pages: Vec<(Coord, [u32; PAGE_LEN])>,
     pub(crate) compressed: Option<Vec<(Coord, Vec<u64>)>>,
+    /// Sorted [`Voxelizer::get_all_points`] after the last call.
+    pub(crate) all_points: Vec<PointI>,
+    /// [`Voxelizer::get_all_points_compressed`] after the last call, sorted
+    /// by key.
+    pub(crate) all_points_compressed: Vec<CompressedVoxelGroup>,
 }
 
 /// Multipliers [`scenario_with`] switches to before call 2, different from
@@ -401,6 +476,8 @@ pub(crate) fn scenario_with<T: TestVoxelizer>(mut v: T, switch: Option<Multiplie
         results,
         pages: v.pages(),
         compressed: v.compressed_pages(),
+        all_points: sorted(v.get_all_points()),
+        all_points_compressed: sorted_groups(v.get_all_points_compressed()),
     }
 }
 
@@ -417,6 +494,11 @@ pub(crate) fn assert_snapshot_eq(got: &Snapshot, expected: &Snapshot, ctx: &str)
     assert_eq!(
         got.compressed, expected.compressed,
         "{ctx}: compressed pages"
+    );
+    assert_eq!(got.all_points, expected.all_points, "{ctx}: dump");
+    assert_eq!(
+        got.all_points_compressed, expected.all_points_compressed,
+        "{ctx}: compressed dump"
     );
 }
 
@@ -523,6 +605,28 @@ macro_rules! shared_tests {
             set_hit_multiplier_zero_spares_hit_voxels,
             set_multipliers_with_compress,
             set_multipliers_same_as_constructed,
+            get_all_points_empty,
+            get_all_points_single_target,
+            get_all_points_matches_voxels,
+            get_all_points_zero_intensity_target,
+            get_all_points_matches_replayed_results,
+            get_all_points_negative_and_large_coords,
+            get_all_points_emptied_page_gone,
+            get_all_points_does_not_change_state,
+            get_all_points_with_compress_returns_values,
+            compressed_voxel_group_size,
+            get_all_points_compressed_empty,
+            get_all_points_compressed_single_voxel,
+            get_all_points_compressed_group_keys,
+            get_all_points_compressed_decodes_to_bits,
+            get_all_points_compressed_matches_replayed_results,
+            get_all_points_compressed_destroyed_group_removed,
+            get_all_points_compressed_groups_unique_non_empty,
+            get_all_points_compressed_plain_empty,
+            get_all_points_compressed_plain_single_voxel,
+            get_all_points_compressed_plain_matches_voxels,
+            get_all_points_compressed_plain_threshold,
+            get_all_points_compressed_plain_matches_compress_mode,
             scenario_repeatable,
             switched_scenario_repeatable,
         );
@@ -2062,6 +2166,288 @@ pub(crate) fn set_multipliers_same_as_constructed<T: TestVoxelizer>() {
             );
         }
     }
+}
+
+// -------------------------------------------------------------------- dump
+
+pub(crate) fn get_all_points_empty<T: TestVoxelizer>() {
+    assert!(plain::<T>().get_all_points().is_empty());
+    assert!(compressed::<T>().get_all_points().is_empty());
+}
+
+pub(crate) fn get_all_points_single_target<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    from_above(&mut v, (5, 6, 7), 3.0);
+    assert_eq!(v.get_all_points(), vec![pi(5, 6, 7, 3)]);
+}
+
+pub(crate) fn get_all_points_matches_voxels<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| !p.compress) {
+        let mut v = T::with_params(params.clone());
+        workload(&mut v);
+        let dump = v.get_all_points();
+        let zeros = dump.iter().filter(|p| p.i == 0).count();
+        assert_eq!(zeros, 0, "{params:?}: zero voxels dumped");
+        assert_eq!(sorted(dump), nonzero_voxels(&v), "{params:?}");
+    }
+}
+
+pub(crate) fn get_all_points_zero_intensity_target<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    assert!(from_above(&mut v, (5, 6, 7), 0.0).is_empty());
+    assert!(v.get_all_points().is_empty());
+}
+
+pub(crate) fn get_all_points_matches_replayed_results<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| !p.compress) {
+        let mut v = T::with_params(params.clone());
+        let replayed: Vec<_> = replay(workload(&mut v))
+            .into_iter()
+            .map(|((x, y, z), i)| pi(x, y, z, i))
+            .collect();
+        assert!(!replayed.is_empty());
+        assert_eq!(nonzero(v.get_all_points()), replayed, "{params:?}");
+    }
+}
+
+pub(crate) fn get_all_points_negative_and_large_coords<T: TestVoxelizer>() {
+    let voxels = [
+        (-1, -1, -1, 1),
+        (-4, 3, -5, 2),
+        (3, 4, -4, 3),
+        (63, -64, 64, 4),
+        (i32::MIN, i32::MAX, 0, 5),
+        (i32::MAX, i32::MIN, -1, 6),
+    ];
+    let mut v = plain::<T>();
+    v.set_voxels(&voxels);
+    let expected = sorted(voxels.map(|(x, y, z, i)| pi(x, y, z, i)).to_vec());
+    assert_eq!(nonzero(v.get_all_points()), expected);
+}
+
+pub(crate) fn get_all_points_emptied_page_gone<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    from_above(&mut v, (0, 0, 0), 2.0);
+    // Drops (0, 0, 0) to 0, which empties its page
+    along_x(&mut v, 0, 5, 0, 0, 2.0);
+    let dump = v.get_all_points();
+    assert!(dump.iter().all(|p| v.get_index(p).0 != (0, 0, 0)));
+    assert_eq!(nonzero(dump), vec![pi(5, 0, 0, 2)]);
+}
+
+pub(crate) fn get_all_points_does_not_change_state<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS {
+        let mut v = T::with_params(params.clone());
+        let mut untouched = T::with_params(params.clone());
+        assert_eq!(workload(&mut v), workload(&mut untouched), "{params:?}");
+        let first = sorted(v.get_all_points());
+        assert_eq!(sorted(v.get_all_points()), first, "{params:?}");
+        assert_eq!(
+            sorted_groups(v.get_all_points_compressed()),
+            sorted_groups(v.get_all_points_compressed()),
+            "{params:?}"
+        );
+        assert_eq!(v.pending_results(), 0, "{params:?}");
+        assert_eq!(workload(&mut v), workload(&mut untouched), "{params:?}");
+        assert_eq!(v.pages(), untouched.pages(), "{params:?}");
+        assert_eq!(
+            v.compressed_pages(),
+            untouched.compressed_pages(),
+            "{params:?}"
+        );
+    }
+}
+
+pub(crate) fn get_all_points_with_compress_returns_values<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        let mut v = T::with_params(params.clone());
+        workload(&mut v);
+        assert_eq!(
+            nonzero(v.get_all_points()),
+            nonzero_voxels(&v),
+            "{params:?}"
+        );
+    }
+}
+
+// --------------------------------------------------------- compressed dump
+
+pub(crate) fn compressed_voxel_group_size<T: TestVoxelizer>() {
+    assert_eq!(POINTS_IN_VOXEL_GROUP, COMPRESSED_PAGE_LEN);
+    assert_eq!(ALL_POINTS_GROUP_EDGE_BITS, T::BITS_FOR_COMPRESSED_ZORDER);
+}
+
+pub(crate) fn get_all_points_compressed_empty<T: TestVoxelizer>() {
+    assert!(compressed::<T>().get_all_points_compressed().is_empty());
+}
+
+pub(crate) fn get_all_points_compressed_single_voxel<T: TestVoxelizer>() {
+    let mut v = compressed::<T>();
+    from_above(&mut v, (5, 6, 7), 1.0);
+    let groups = v.get_all_points_compressed();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].point, pi(0, 0, 0, 0));
+    let words: Vec<_> = groups[0]
+        .values
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, word)| *word != 0)
+        .collect();
+    let inner = ZOrder::default().index_of([1u16, 1, 1]) as usize;
+    assert_eq!(words, vec![(inner, page_bit(5, 6, 7))]);
+}
+
+pub(crate) fn get_all_points_compressed_group_keys<T: TestVoxelizer>() {
+    // A group spans 16 fine pages, 64 voxels, along every axis
+    for (voxel, key) in [
+        ((-1, -1, -1), (-1, -1, -1)),
+        ((64, 0, 0), (1, 0, 0)),
+        ((63, 63, 63), (0, 0, 0)),
+        ((-65, 0, 0), (-2, 0, 0)),
+        ((0, -64, 128), (0, -1, 2)),
+    ] {
+        let mut v = compressed::<T>();
+        from_above(&mut v, voxel, 1.0);
+        let groups = v.get_all_points_compressed();
+        assert_eq!(groups.len(), 1, "voxel {voxel:?}");
+        assert_eq!(
+            groups[0].point,
+            pi(key.0, key.1, key.2, 0),
+            "voxel {voxel:?}"
+        );
+        assert_eq!(
+            decode_groups(&groups),
+            vec![pi(voxel.0, voxel.1, voxel.2, 1)],
+            "voxel {voxel:?}"
+        );
+    }
+}
+
+pub(crate) fn get_all_points_compressed_decodes_to_bits<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        let mut v = T::with_params(params.clone());
+        workload(&mut v);
+        let bits = compressed_bits(&v);
+        assert!(!bits.is_empty(), "{params:?}");
+        assert_eq!(
+            decode_groups(&v.get_all_points_compressed()),
+            bits,
+            "{params:?}"
+        );
+    }
+}
+
+pub(crate) fn get_all_points_compressed_matches_replayed_results<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        let mut v = T::with_params(params.clone());
+        let replayed = replay(workload(&mut v));
+        let mut dumped = BTreeMap::new();
+        for p in decode_groups(&v.get_all_points_compressed()) {
+            *dumped.entry(block_of(p.x, p.y, p.z)).or_insert(0) |= block_bit(p.x, p.y, p.z);
+        }
+        assert_eq!(dumped, replayed, "{params:?}");
+    }
+}
+
+pub(crate) fn get_all_points_compressed_destroyed_group_removed<T: TestVoxelizer>() {
+    let mut v = compressed::<T>();
+    from_above(&mut v, (5, 6, 7), 1.0);
+    // Destroys (5, 6, 7) and constructs (70, 6, 7) in the next group
+    along_x(&mut v, 5, 70, 6, 7, 1.0);
+    let groups = v.get_all_points_compressed();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].point, pi(1, 0, 0, 0));
+    assert_eq!(decode_groups(&groups), vec![pi(70, 6, 7, 1)]);
+}
+
+pub(crate) fn get_all_points_compressed_groups_unique_non_empty<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS {
+        let mut v = T::with_params(params.clone());
+        workload(&mut v);
+        let groups = v.get_all_points_compressed();
+        assert!(groups.len() > 1, "{params:?}");
+        let mut points: Vec<_> = groups.iter().map(|g| g.point.clone()).collect();
+        points.sort();
+        points.dedup();
+        assert_eq!(points.len(), groups.len(), "{params:?}");
+        assert!(points.iter().all(|p| p.i == 0), "{params:?}");
+        assert!(
+            groups.iter().all(|g| g.values.iter().any(|&w| w != 0)),
+            "{params:?}"
+        );
+    }
+}
+
+// ---------------------------------------- compressed dump without compress
+
+pub(crate) fn get_all_points_compressed_plain_empty<T: TestVoxelizer>() {
+    assert!(plain::<T>().get_all_points_compressed().is_empty());
+}
+
+pub(crate) fn get_all_points_compressed_plain_single_voxel<T: TestVoxelizer>() {
+    let mut v = plain::<T>();
+    from_above(&mut v, (5, 6, 7), 3.0);
+    let groups = v.get_all_points_compressed();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].point, pi(0, 0, 0, 0));
+    assert_eq!(decode_groups(&groups), vec![pi(5, 6, 7, 1)]);
+}
+
+pub(crate) fn get_all_points_compressed_plain_matches_voxels<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| !p.compress) {
+        let mut v = T::with_params(params.clone());
+        workload(&mut v);
+        let expected = sorted(
+            nonzero_voxels(&v)
+                .into_iter()
+                .filter(|p| p.i >= params.construct_threshold)
+                .map(|p| pi(p.x, p.y, p.z, 1))
+                .collect(),
+        );
+        assert!(!expected.is_empty(), "{params:?}");
+        assert_eq!(
+            decode_groups(&v.get_all_points_compressed()),
+            expected,
+            "{params:?}"
+        );
+    }
+}
+
+pub(crate) fn get_all_points_compressed_plain_threshold<T: TestVoxelizer>() {
+    let voxels = [(1, 2, 3, 2), (5, 6, 7, 3), (70, 0, 0, 4)];
+    let mut v = T::with_params(VoxelizerParams {
+        construct_threshold: 3,
+        ..PLAIN
+    });
+    v.set_voxels(&voxels);
+    assert_eq!(
+        decode_groups(&v.get_all_points_compressed()),
+        vec![pi(5, 6, 7, 1), pi(70, 0, 0, 1)]
+    );
+    // A threshold of 0 still leaves out voxels that are 0
+    let mut v = T::with_params(VoxelizerParams {
+        construct_threshold: 0,
+        ..PLAIN
+    });
+    v.set_voxels(&voxels);
+    assert_eq!(
+        decode_groups(&v.get_all_points_compressed()),
+        vec![pi(1, 2, 3, 1), pi(5, 6, 7, 1), pi(70, 0, 0, 1)]
+    );
+}
+
+pub(crate) fn get_all_points_compressed_plain_matches_compress_mode<T: TestVoxelizer>() {
+    // With thresholds 0 and 1 no voxel is between them, so both modes
+    // agree on what is constructed
+    let dump = |compress| {
+        let mut v = T::with_params(VoxelizerParams { compress, ..PLAIN });
+        workload(&mut v);
+        sorted_groups(v.get_all_points_compressed())
+    };
+    let plain = dump(false);
+    assert!(plain.len() > 1);
+    assert_eq!(plain, dump(true));
 }
 
 // ---------------------------------------------------------------- scenario
