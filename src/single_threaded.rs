@@ -1,7 +1,8 @@
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -139,7 +140,7 @@ impl Voxelizer for SingleThreaded {
                         idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
                     )
                 };
-                let bit: u64 = 1 << x << (y << 2) << (z << 4);
+                let bit = Self::word_bit([x, y, z]);
                 // A voxel between the thresholds keeps its state, so a
                 // crossing changes it only when it is in the other one
                 if prev < self.construct_threshold && voxel >= self.construct_threshold {
@@ -203,7 +204,30 @@ impl Voxelizer for SingleThreaded {
                 })
                 .collect()
         } else {
-            todo!()
+            // Without compress there is no state between the thresholds, so a
+            // voxel counts as constructed once it reaches `construct_threshold`
+            let mut groups: HashMap<ThreeDim, Box<[u64; POINTS_IN_VOXEL_GROUP]>> =
+                HashMap::default();
+            for (page, values) in &self.voxels {
+                let word = values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v != 0 && **v >= self.construct_threshold)
+                    .fold(0, |word, (inner, _)| {
+                        word | Self::word_bit(self.zorder.coord_of(inner as u64))
+                    });
+                if word != 0 {
+                    let (key, inner) = self.compressed_index(*page);
+                    groups.entry(key).or_insert_with(|| Box::new([0; _]))[inner] = word;
+                }
+            }
+            groups
+                .into_iter()
+                .map(|((x, y, z), values)| CompressedVoxelGroup {
+                    point: PointI { x, y, z, i: 0 },
+                    values,
+                })
+                .collect()
         }
     }
     #[inline]
@@ -283,6 +307,11 @@ impl SingleThreaded {
                 (page.2 & BITS_FOR_COMPRESSED_ZORDER_MASK) as u16,
             ]) as usize,
         )
+    }
+    /// Bit of the voxel at `[x, y, z]` of a fine page in its compressed word.
+    #[inline]
+    fn word_bit([x, y, z]: [u16; 3]) -> u64 {
+        1 << x << (y << 2) << (z << 4)
     }
     /// Removes pages zeroed during the call that are empty (all voxels 0 and
     /// none constructed) and compressed pages from `emptied_compressed`
@@ -475,9 +504,9 @@ mod test {
         Voxelizer, VoxelizerParams,
         geometry::{PointF, PointI, ZOrder},
         test::{
-            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PagedIndex, SCENARIO_PARAMS, TestVoxelizer,
-            along_x, block_bit, block_of, compressed, compressed_bits, cube_faces, from_above,
-            nonzero_voxels, page_bit, pf, pi, plain, sorted,
+            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PLAIN, PagedIndex, SCENARIO_PARAMS,
+            TestVoxelizer, along_x, block_bit, block_of, compressed, compressed_bits, cube_faces,
+            from_above, nonzero_voxels, page_bit, pf, pi, plain, sorted,
         },
     };
 
@@ -705,13 +734,11 @@ mod test {
             let mut untouched = v.clone();
             let first = sorted(v.get_all_points());
             assert_eq!(sorted(v.get_all_points()), first, "{params:?}");
-            if params.compress {
-                assert_eq!(
-                    v.get_all_points_compressed(),
-                    v.get_all_points_compressed(),
-                    "{params:?}"
-                );
-            }
+            assert_eq!(
+                v.get_all_points_compressed(),
+                v.get_all_points_compressed(),
+                "{params:?}"
+            );
             assert_eq!(v.pending_results(), 0, "{params:?}");
             assert_eq!(workload(&mut v), workload(&mut untouched), "{params:?}");
             assert_eq!(v.pages(), untouched.pages(), "{params:?}");
@@ -840,7 +867,7 @@ mod test {
 
     #[test]
     fn get_all_points_compressed_groups_unique_non_empty() {
-        for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        for params in SCENARIO_PARAMS {
             let mut v = SingleThreaded::new(params.clone());
             workload(&mut v);
             let groups = v.get_all_points_compressed();
@@ -855,5 +882,87 @@ mod test {
                 "{params:?}"
             );
         }
+    }
+
+    // ---------------------------------------- compressed dump without compress
+
+    #[test]
+    fn get_all_points_compressed_plain_empty() {
+        assert!(
+            plain::<SingleThreaded>()
+                .get_all_points_compressed()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn get_all_points_compressed_plain_single_voxel() {
+        let mut v = plain::<SingleThreaded>();
+        from_above(&mut v, (5, 6, 7), 3.0);
+        let groups = v.get_all_points_compressed();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].point, pi(0, 0, 0, 0));
+        assert_eq!(decode_groups(&groups), vec![pi(5, 6, 7, 1)]);
+    }
+
+    #[test]
+    fn get_all_points_compressed_plain_matches_voxels() {
+        for params in SCENARIO_PARAMS.into_iter().filter(|p| !p.compress) {
+            let mut v = SingleThreaded::new(params.clone());
+            workload(&mut v);
+            let expected = sorted(
+                nonzero_voxels(&v)
+                    .into_iter()
+                    .filter(|p| p.i >= params.construct_threshold)
+                    .map(|p| pi(p.x, p.y, p.z, 1))
+                    .collect(),
+            );
+            assert!(!expected.is_empty(), "{params:?}");
+            assert_eq!(
+                decode_groups(&v.get_all_points_compressed()),
+                expected,
+                "{params:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_all_points_compressed_plain_threshold() {
+        let voxels = [(1, 2, 3, 2), (5, 6, 7, 3), (70, 0, 0, 4)];
+        let mut v = SingleThreaded::new(VoxelizerParams {
+            construct_threshold: 3,
+            ..PLAIN
+        });
+        v.set_voxels(&voxels);
+        assert_eq!(
+            decode_groups(&v.get_all_points_compressed()),
+            vec![pi(5, 6, 7, 1), pi(70, 0, 0, 1)]
+        );
+        // A threshold of 0 still leaves out voxels that are 0
+        let mut v = SingleThreaded::new(VoxelizerParams {
+            construct_threshold: 0,
+            ..PLAIN
+        });
+        v.set_voxels(&voxels);
+        assert_eq!(
+            decode_groups(&v.get_all_points_compressed()),
+            vec![pi(1, 2, 3, 1), pi(5, 6, 7, 1), pi(70, 0, 0, 1)]
+        );
+    }
+
+    #[test]
+    fn get_all_points_compressed_plain_matches_compress_mode() {
+        // With thresholds 0 and 1 no voxel is between them, so both modes
+        // agree on what is constructed
+        let dump = |compress| {
+            let mut v = SingleThreaded::new(VoxelizerParams { compress, ..PLAIN });
+            workload(&mut v);
+            let mut groups = v.get_all_points_compressed();
+            groups.sort_by_key(|g| g.point.clone());
+            groups
+        };
+        let plain = dump(false);
+        assert!(plain.len() > 1);
+        assert_eq!(plain, dump(true));
     }
 }
