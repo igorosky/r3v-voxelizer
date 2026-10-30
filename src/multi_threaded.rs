@@ -26,7 +26,7 @@ pub struct MultiThreaded {
     compressed_voxels:
         Option<DashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_COMPRESSED_ZORDER)]>>,
     result: DashMap<PagedIndex, u32>,
-    // Pages a voxel of which got zeroed during the current call
+    // Pages a voxel of which got zeroed or stayed 0 during the current call
     maybe_empty: DashSet<ThreeDim>,
     resolution: f32,
     multipliers: Multipliers,
@@ -302,6 +302,10 @@ impl MultiThreaded {
         entry[idx.1] = entry[idx.1]
             .saturating_add(point.i * self.multipliers.target)
             .min(self.max_value);
+        // A target adding nothing (or capped at 0) can leave a new page all 0
+        if entry[idx.1] == 0 {
+            self.maybe_empty.insert(idx.0);
+        }
     }
     fn ray_march(&self, mut sensor_pos: PointI, sensor_pos_divided: &PointF, mut point: PointF) {
         // http://www.cse.yorku.ca/~amana/research/grid.pdf

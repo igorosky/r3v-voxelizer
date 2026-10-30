@@ -460,6 +460,7 @@ macro_rules! shared_tests {
             emptied_page_removed,
             partially_emptied_page_kept,
             refilled_page_kept,
+            zero_target_leaves_no_page,
             axis_x_negative,
             axis_y_positive,
             axis_y_negative,
@@ -987,6 +988,38 @@ pub(crate) fn refilled_page_kept<T: TestVoxelizer>() {
     assert_eq!(get_voxel(&v, 1, 0, 0), Some(1));
     assert_eq!(v.pages().len(), 2);
     assert_eq!(v.pending_results(), 0);
+}
+
+pub(crate) fn zero_target_leaves_no_page<T: TestVoxelizer>() {
+    // Intensity 0, or a cap of 0, leaves the target at 0
+    for (params, i) in [
+        (PLAIN, 0.0),
+        (
+            VoxelizerParams {
+                max_value: 0,
+                ..PLAIN
+            },
+            5.0,
+        ),
+        (
+            VoxelizerParams {
+                compress: true,
+                ..PLAIN
+            },
+            0.0,
+        ),
+    ] {
+        let mut v = T::with_params(params.clone());
+        assert!(from_above(&mut v, (5, 6, 7), i).is_empty(), "{params:?}");
+        assert!(v.pages().is_empty(), "{params:?}");
+        assert_eq!(v.pending_results(), 0, "{params:?}");
+        // A page holding anything else is kept
+        v.set_voxel(5, 6, 4, SEED);
+        assert!(from_above(&mut v, (5, 6, 7), i).is_empty(), "{params:?}");
+        assert_eq!(get_voxel(&v, 5, 6, 4), Some(SEED), "{params:?}");
+        assert_eq!(v.pages().len(), 1, "{params:?}");
+        assert_eq!(v.pending_results(), 0, "{params:?}");
+    }
 }
 
 // -------------------------------------------------------- ray march arms

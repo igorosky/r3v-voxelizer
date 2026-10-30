@@ -475,9 +475,9 @@ mod test {
         Voxelizer, VoxelizerParams,
         geometry::{PointF, PointI, ZOrder},
         test::{
-            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PLAIN, PagedIndex, SCENARIO_PARAMS,
-            TestVoxelizer, along_x, block_bit, block_of, compressed, compressed_bits, cube_faces,
-            from_above, nonzero_voxels, page_bit, pf, pi, plain, sorted,
+            COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PagedIndex, SCENARIO_PARAMS, TestVoxelizer,
+            along_x, block_bit, block_of, compressed, compressed_bits, cube_faces, from_above,
+            nonzero_voxels, page_bit, pf, pi, plain, sorted,
         },
     };
 
@@ -655,26 +655,6 @@ mod test {
         let mut v = plain::<SingleThreaded>();
         assert!(from_above(&mut v, (5, 6, 7), 0.0).is_empty());
         assert!(v.get_all_points().is_empty());
-    }
-
-    #[test]
-    fn zero_target_leaves_no_page() {
-        // Intensity 0, or a cap of 0, leaves the target at 0
-        for (params, i) in [
-            (PLAIN, 0.0),
-            (
-                VoxelizerParams {
-                    max_value: 0,
-                    ..PLAIN
-                },
-                5.0,
-            ),
-        ] {
-            let mut v = SingleThreaded::new(params.clone());
-            assert!(from_above(&mut v, (5, 6, 7), i).is_empty(), "{params:?}");
-            assert!(v.pages().is_empty(), "{params:?}");
-            assert_eq!(v.pending_results(), 0, "{params:?}");
-        }
     }
 
     #[test]
