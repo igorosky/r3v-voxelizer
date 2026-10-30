@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::wasm_bindgen;
 
-use crate::{Multipliers, PointF, PointI};
+use crate::{CompressedVoxelGroup, Multipliers, PointF, PointI};
 
 #[wasm_bindgen]
 impl Multipliers {
@@ -27,6 +27,15 @@ impl PointI {
     #[wasm_bindgen(constructor)]
     pub fn new(x: i32, y: i32, z: i32, i: u32) -> Self {
         Self { x, y, z, i }
+    }
+}
+
+#[wasm_bindgen]
+impl CompressedVoxelGroup {
+    /// Words of the group, as a BigUint64Array.
+    #[wasm_bindgen(getter)]
+    pub fn values(&self) -> Vec<u64> {
+        self.values.to_vec()
     }
 }
 

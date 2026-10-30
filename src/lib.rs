@@ -90,6 +90,8 @@ pub struct VoxelizerParams {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressedVoxelGroup {
     /// i elem is unused but this would be wasted anyway because of alignment
+    #[cfg_attr(feature = "js", wasm_bindgen(getter_with_clone, readonly))]
     pub point: PointI,
+    #[cfg_attr(feature = "js", wasm_bindgen(skip))]
     pub values: Box<[u64; POINTS_IN_VOXEL_GROUP]>,
 }
