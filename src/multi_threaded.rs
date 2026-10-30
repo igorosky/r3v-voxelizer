@@ -584,10 +584,10 @@ mod test {
             |params, threads| MultiThreaded::new(params, threads).expect("thread pool must build");
         for switch in [None, Some(SWITCHED)] {
             for params in SCENARIO_PARAMS {
-                let expected = scenario_with(make(params, 1), switch);
+                let expected = scenario_with(make(params.clone(), 1), switch);
                 assert!(expected.results.iter().all(|r| !r.is_empty()));
                 for threads in [2, 4, 8, 16] {
-                    let got = scenario_with(make(params, threads), switch);
+                    let got = scenario_with(make(params.clone(), threads), switch);
                     assert_snapshot_eq(
                         &got,
                         &expected,

@@ -90,6 +90,6 @@ pub struct VoxelizerParams {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressedVoxelGroup {
     /// i elem is unused but this would be wasted anyway because of alignment
-    point: PointI,
-    values: Box<[u64; POINTS_IN_VOXEL_GROUP]>,
+    pub point: PointI,
+    pub values: Box<[u64; POINTS_IN_VOXEL_GROUP]>,
 }

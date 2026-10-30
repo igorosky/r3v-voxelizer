@@ -2016,7 +2016,7 @@ pub(crate) fn set_multipliers_same_as_constructed<T: TestVoxelizer>() {
                 target: 4,
             },
         ] {
-            let mut set = T::with_params(params);
+            let mut set = T::with_params(params.clone());
             set.set_multipliers(multipliers);
             let constructed = T::with_params(VoxelizerParams {
                 multipliers,
@@ -2035,22 +2035,22 @@ pub(crate) fn set_multipliers_same_as_constructed<T: TestVoxelizer>() {
 
 pub(crate) fn scenario_repeatable<T: TestVoxelizer>() {
     for params in SCENARIO_PARAMS {
-        let a = scenario(T::with_params(params));
+        let a = scenario(T::with_params(params.clone()));
         assert!(a.results.iter().all(|r| !r.is_empty()));
-        let b = scenario(T::with_params(params));
+        let b = scenario(T::with_params(params.clone()));
         assert_snapshot_eq(&a, &b, &format!("{params:?}"));
     }
 }
 
 pub(crate) fn switched_scenario_repeatable<T: TestVoxelizer>() {
     for params in SCENARIO_PARAMS {
-        let a = scenario_with(T::with_params(params), Some(SWITCHED));
+        let a = scenario_with(T::with_params(params.clone()), Some(SWITCHED));
         assert!(a.results.iter().all(|r| !r.is_empty()));
         // Switching changes the outcome of call 2 only.
-        let unswitched = scenario(T::with_params(params));
+        let unswitched = scenario(T::with_params(params.clone()));
         assert_eq!(a.results[0], unswitched.results[0], "{params:?}");
         assert_ne!(a.results[1], unswitched.results[1], "{params:?}");
-        let b = scenario_with(T::with_params(params), Some(SWITCHED));
+        let b = scenario_with(T::with_params(params.clone()), Some(SWITCHED));
         assert_snapshot_eq(&a, &b, &format!("{params:?}"));
     }
 }
@@ -2097,11 +2097,11 @@ fn single_and_multi_agree() {
     use crate::{MultiThreaded, SingleThreaded};
     for switch in [None, Some(SWITCHED)] {
         for params in SCENARIO_PARAMS {
-            let expected = scenario_with(SingleThreaded::new(params), switch);
+            let expected = scenario_with(SingleThreaded::new(params.clone()), switch);
             assert!(expected.results.iter().all(|r| !r.is_empty()));
             for threads in [1, 2, 4, 8] {
                 let got = scenario_with(
-                    MultiThreaded::new(params, threads).expect("thread pool must build"),
+                    MultiThreaded::new(params.clone(), threads).expect("thread pool must build"),
                     switch,
                 );
                 assert_snapshot_eq(
@@ -2120,10 +2120,10 @@ fn single_and_wgpu_agree() {
     use crate::{SingleThreaded, WgpuAccelerated};
     for switch in [None, Some(SWITCHED)] {
         for params in SCENARIO_PARAMS {
-            let expected = scenario_with(SingleThreaded::new(params), switch);
+            let expected = scenario_with(SingleThreaded::new(params.clone()), switch);
             assert!(expected.results.iter().all(|r| !r.is_empty()));
             let got = scenario_with(
-                pollster::block_on(WgpuAccelerated::new(params, 1 << 12))
+                pollster::block_on(WgpuAccelerated::new(params.clone(), 1 << 12))
                     .expect("a GPU adapter with compute shaders is required"),
                 switch,
             );
