@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use crate::{
-    Multipliers, Voxelizer, VoxelizerParams,
-    geometry::{PointF, PointI},
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
+    Voxelizer, VoxelizerParams,
+    geometry::{PointF, PointI, ZOrder},
 };
 
 // Must match the shader
@@ -8,6 +11,8 @@ const WORKGROUP_SIZE: u32 = 256;
 const BITS_FOR_ENTRY_VOXEL_COUNT: u32 = 2;
 const ENTRY_VOXEL_COUNT: u64 = 1 << (3 * BITS_FOR_ENTRY_VOXEL_COUNT);
 const BUCKET_SIZE: u64 = 2;
+/// Set in every written key word
+const KEY_SET: u32 = 1 << 31;
 /// `Entry`: key[3], flags, occupancy[2]
 const ENTRY_BYTES: u64 = 6 * 4;
 /// Entries first probed for the keys hashed into a bucket
@@ -24,6 +29,8 @@ const PARAMS_BYTES: u64 = 16 * 4;
 const POINT_BYTES: u64 = 16;
 /// Capacity (in points) the input and output buffers start with
 const INITIAL_CAPACITY: u64 = 1024;
+/// Entries whose voxels a dump reads back at once, 8 MiB of voxels
+const READBACK_CHUNK_ENTRIES: u64 = 1 << 14;
 /// Environment variable turning on the diagnostics printed to stderr
 const DEBUG_ENV: &str = "R3V_VOXELIZER_DEBUG";
 /// Counts (`altered`, output `len`) remembered for debug reports
@@ -88,10 +95,9 @@ pub struct WgpuAccelerated {
     altered: wgpu::Buffer,
     output: wgpu::Buffer,
     emptied: wgpu::Buffer,
-    // Used through `storage_bind_group`, read back by the tests and debug
-    // reports
+    // Used through `storage_bind_group`, read back by dumps, the tests and
+    // debug reports
     buckets: wgpu::Buffer,
-    #[cfg_attr(not(test), expect(dead_code))]
     voxels: wgpu::Buffer,
     max_binding_size: u64,
     max_workgroups: u32,
@@ -121,10 +127,41 @@ impl Voxelizer for WgpuAccelerated {
     fn set_multipliers(&mut self, multipliers: Multipliers) {
         self.multipliers = multipliers;
     }
+    /// Blocks until the GPU is done, see
+    /// [`WgpuAccelerated::get_all_points_async`] for targets that cannot
+    /// block (the web).
+    fn get_all_points(&self) -> Vec<PointI> {
+        pollster::block_on(self.get_all_points_async())
+    }
+    /// Blocks until the GPU is done, see
+    /// [`WgpuAccelerated::get_all_points_compressed_async`] for targets that
+    /// cannot block (the web).
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+        pollster::block_on(self.get_all_points_compressed_async())
+    }
     #[inline]
     fn multipliers(&self) -> Multipliers {
         self.multipliers
     }
+}
+
+/// Page stored in the hashmap, read back from the GPU.
+struct StoredPage {
+    /// Voxel coordinates divided by 4
+    page: (i32, i32, i32),
+    /// Read only by the tests, 0 between calls
+    #[cfg_attr(not(test), expect(dead_code))]
+    flags: u32,
+    /// Constructed voxels, bit `x + 4y + 16z`
+    occupancy: u64,
+    /// Voxel values in z-order, all 0 unless read back
+    voxels: [u32; ENTRY_VOXEL_COUNT as usize],
+}
+
+/// Bit of the voxel at `[x, y, z]` of a page in its occupancy word.
+#[inline]
+fn word_bit([x, y, z]: [u16; 3]) -> u64 {
+    1 << x << (y << 2) << (z << 4)
 }
 
 impl WgpuAccelerated {
@@ -214,6 +251,134 @@ impl WgpuAccelerated {
             }
         }
         result
+    }
+
+    /// Same as [`Voxelizer::get_all_points`], without blocking while the GPU
+    /// works. Reads the whole hashmap back.
+    pub async fn get_all_points_async(&self) -> Vec<PointI> {
+        let zorder = &ZOrder::default();
+        self.stored_pages(true)
+            .await
+            .into_iter()
+            .flat_map(|stored| {
+                let (px, py, pz) = stored.page;
+                stored
+                    .voxels
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, v)| *v != 0)
+                    .map(move |(inner, i)| {
+                        let [x, y, z] = zorder.coord_of(inner as u64);
+                        PointI {
+                            x: (px << BITS_FOR_ENTRY_VOXEL_COUNT) | x as i32,
+                            y: (py << BITS_FOR_ENTRY_VOXEL_COUNT) | y as i32,
+                            z: (pz << BITS_FOR_ENTRY_VOXEL_COUNT) | z as i32,
+                            i,
+                        }
+                    })
+            })
+            .collect()
+    }
+
+    /// Same as [`Voxelizer::get_all_points_compressed`], without blocking
+    /// while the GPU works. In compress mode it reads back only the keys and
+    /// occupancy of the pages, otherwise the whole hashmap.
+    pub async fn get_all_points_compressed_async(&self) -> Vec<CompressedVoxelGroup> {
+        const MASK: i32 = (1 << ALL_POINTS_GROUP_EDGE_BITS) - 1;
+        let zorder = ZOrder::default();
+        let mut groups: HashMap<(i32, i32, i32), Box<[u64; POINTS_IN_VOXEL_GROUP]>> =
+            HashMap::new();
+        for stored in self.stored_pages(!self.compress).await {
+            let word = if self.compress {
+                stored.occupancy
+            } else {
+                // Without compress there is no state between the thresholds,
+                // so a voxel counts as constructed once it reaches
+                // `construct_threshold`
+                stored
+                    .voxels
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v != 0 && **v >= self.construct_threshold)
+                    .fold(0, |word, (inner, _)| {
+                        word | word_bit(zorder.coord_of(inner as u64))
+                    })
+            };
+            if word == 0 {
+                continue;
+            }
+            let (x, y, z) = stored.page;
+            let key = (
+                x >> ALL_POINTS_GROUP_EDGE_BITS,
+                y >> ALL_POINTS_GROUP_EDGE_BITS,
+                z >> ALL_POINTS_GROUP_EDGE_BITS,
+            );
+            let inner =
+                zorder.index_of([(x & MASK) as u16, (y & MASK) as u16, (z & MASK) as u16]) as usize;
+            groups.entry(key).or_insert_with(|| Box::new([0; _]))[inner] = word;
+        }
+        groups
+            .into_iter()
+            .map(|((x, y, z), values)| CompressedVoxelGroup {
+                point: PointI { x, y, z, i: 0 },
+                values,
+            })
+            .collect()
+    }
+
+    /// Every page stored in the hashmap, with the values of its voxels when
+    /// `with_voxels`. The voxels are read back in chunks of at most
+    /// `READBACK_CHUNK_ENTRIES` entries, skipping the ones holding no page.
+    async fn stored_pages(&self, with_voxels: bool) -> Vec<StoredPage> {
+        let entry_words = (ENTRY_BYTES / 4) as usize;
+        let voxel_words = (VOXEL_BYTES / 4) as usize;
+        let entries = self
+            .read_words(self.encoder(), &self.buckets, 0, self.buckets.size() / 4)
+            .await;
+        // Shifting left restores the sign of the page coordinates and drops
+        // KEY_SET
+        let page =
+            |c: u32| ((c << BITS_FOR_ENTRY_VOXEL_COUNT) as i32) >> BITS_FOR_ENTRY_VOXEL_COUNT;
+        // With the index of their entry
+        let mut pages: Vec<(usize, StoredPage)> = entries
+            .chunks_exact(entry_words)
+            .enumerate()
+            .filter(|(_, words)| words[0] & KEY_SET != 0)
+            .map(|(entry, words)| {
+                let [x, y, z, flags, low, high] = *words else {
+                    unreachable!("an entry is 6 words");
+                };
+                let stored = StoredPage {
+                    page: (page(x), page(y), page(z)),
+                    flags,
+                    occupancy: u64::from(low) | (u64::from(high) << 32),
+                    voxels: [0; _],
+                };
+                (entry, stored)
+            })
+            .collect();
+        if with_voxels {
+            let chunk = READBACK_CHUNK_ENTRIES as usize;
+            for in_chunk in pages.chunk_by_mut(|(a, _), (b, _)| a / chunk == b / chunk) {
+                let first = in_chunk[0].0;
+                let count = in_chunk[in_chunk.len() - 1].0 + 1 - first;
+                let words = self
+                    .read_words(
+                        self.encoder(),
+                        &self.voxels,
+                        (first as u64) * ENTRY_VOXEL_COUNT * VOXEL_BYTES,
+                        (count as u64) * ENTRY_VOXEL_COUNT * VOXEL_BYTES / 4,
+                    )
+                    .await;
+                for (entry, stored) in in_chunk {
+                    let offset = (*entry - first) * ENTRY_VOXEL_COUNT as usize;
+                    // The value is the first word of a `Voxel`
+                    stored.voxels =
+                        std::array::from_fn(|inner| words[(offset + inner) * voxel_words]);
+                }
+            }
+        }
+        pages.into_iter().map(|(_, stored)| stored).collect()
     }
 
     /// GPU memory taken by the hashmap of `bucket_count` buckets, in bytes.
@@ -969,10 +1134,11 @@ mod test {
 
     use super::{
         BITS_FOR_ENTRY_VOXEL_COUNT, BUCKET_BYTES, BUCKET_SIZE, ENTRY_BYTES, ENTRY_VOXEL_COUNT,
-        Kernel, VOXEL_BYTES, WgpuAccelerated, invalidate_cpu_cache, off_block_grid,
+        KEY_SET, Kernel, READBACK_CHUNK_ENTRIES, StoredPage, VOXEL_BYTES, WgpuAccelerated,
+        invalidate_cpu_cache, off_block_grid,
     };
     use crate::{
-        Multipliers, Voxelizer, VoxelizerParams,
+        ALL_POINTS_GROUP_EDGE_BITS, Multipliers, Voxelizer, VoxelizerParams,
         geometry::{PointI, ZOrder},
         test::{
             COMPRESSED_PAGE_LEN, Coord, PAGE_LEN, PLAIN, PagedIndex, TestVoxelizer, along_x,
@@ -982,10 +1148,9 @@ mod test {
 
     /// Hashmap size used by the shared suite: 8192 pages.
     const TEST_BUCKETS: u32 = 1 << 12;
-    const BITS_FOR_COMPRESSED_ZORDER: u32 = 4;
+    const BITS_FOR_COMPRESSED_ZORDER: u32 = ALL_POINTS_GROUP_EDGE_BITS;
     const BITS_FOR_COMPRESSED_ZORDER_MASK: i32 = 2_i32.pow(BITS_FOR_COMPRESSED_ZORDER) - 1;
     // Must match the shader
-    const KEY_SET: u32 = 1 << 31;
     const KEY_REMOVED: u32 = 1;
     const ENTRY_TOUCHED: u32 = 1;
     const ENTRY_MAYBE_EMPTY: u32 = 2;
@@ -1022,14 +1187,6 @@ mod test {
         )
     }
 
-    /// Occupied hashmap entry (page) read back from the GPU.
-    struct Entry {
-        page: Coord,
-        flags: u32,
-        occupancy: u64,
-        voxels: [u32; PAGE_LEN],
-    }
-
     impl WgpuAccelerated {
         /// Whole `buffer`, read back as words.
         fn words_of(&self, buffer: &wgpu::Buffer) -> Vec<u32> {
@@ -1041,32 +1198,9 @@ mod test {
             )))
         }
 
-        fn entries(&self) -> Vec<Entry> {
-            let entries = self.words_of(&self.buckets);
-            let voxels = self.words_of(&self.voxels);
-            let entry_words = (ENTRY_BYTES / 4) as usize;
-            let voxel_words = (VOXEL_BYTES / 4) as usize;
-            let mut out = Vec::new();
-            for (entry, words) in entries.chunks_exact(entry_words).enumerate() {
-                let [x, y, z, flags, low, high] = *words else {
-                    unreachable!("an entry is 6 words");
-                };
-                if x & KEY_SET == 0 {
-                    continue;
-                }
-                // Shifting left restores the sign of the page coordinates and
-                // drops KEY_SET
-                let page = |c: u32| ((c << BITS_FOR_ENTRY_VOXEL_COUNT) as i32) >> 2;
-                out.push(Entry {
-                    page: (page(x), page(y), page(z)),
-                    flags,
-                    occupancy: u64::from(low) | (u64::from(high) << 32),
-                    voxels: std::array::from_fn(|inner| {
-                        voxels[(entry * ENTRY_VOXEL_COUNT as usize + inner) * voxel_words]
-                    }),
-                });
-            }
-            out
+        /// Every occupied hashmap entry (page) with its voxels.
+        fn entries(&self) -> Vec<StoredPage> {
+            pollster::block_on(self.stored_pages(true))
         }
 
         /// First key word of every hashmap entry, set ones included.
@@ -1459,6 +1593,57 @@ mod test {
             assert_eq!(from_above(&mut v, (x, y, z), 1.0), vec![pi(x, y, z, 1)]);
         }
         assert_eq!(v.pages().len(), entries);
+    }
+
+    // ------------------------------------------------------------- dump
+
+    #[test]
+    fn dump_spans_readback_chunks() {
+        // Entries of two readback chunks, pages stored in both of them
+        let chunk = READBACK_CHUNK_ENTRIES as usize;
+        let mut v = new(
+            1.0,
+            1,
+            1,
+            0,
+            1,
+            false,
+            (2 * READBACK_CHUNK_ENTRIES / BUCKET_SIZE) as u32,
+        );
+        let targets = cube_faces(40, 32, 8);
+        let intensity = |n: usize| (1 + n % 7) as u32;
+        let points: Vec<_> = targets
+            .iter()
+            .enumerate()
+            .map(|(n, &(x, y, z))| {
+                pf(
+                    x as f32 + 0.5,
+                    y as f32 + 0.5,
+                    z as f32 + 0.5,
+                    intensity(n) as f32,
+                )
+            })
+            .collect();
+        v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+        let heads = v.key_heads();
+        assert_eq!(heads.len(), 2 * chunk);
+        assert!(heads[..chunk].iter().any(|key| key & KEY_SET != 0));
+        assert!(heads[chunk..].iter().any(|key| key & KEY_SET != 0));
+        let expected = sorted(
+            targets
+                .iter()
+                .enumerate()
+                .map(|(n, &(x, y, z))| pi(x, y, z, intensity(n)))
+                .collect(),
+        );
+        assert_eq!(sorted(v.get_all_points()), expected);
+        let bits: u32 = v
+            .get_all_points_compressed()
+            .iter()
+            .flat_map(|group| group.values.iter())
+            .map(|word| word.count_ones())
+            .sum();
+        assert_eq!(bits as usize, targets.len());
     }
 
     // ------------------------------------------------------------ debug

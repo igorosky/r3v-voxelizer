@@ -1,12 +1,14 @@
 /*
  * Test cases for the C bindings, ported from the shared Rust tests in
  * src/test.rs. Only what the C API exposes is checked: the updates returned
- * by add_points. Where the Rust tests read the voxel grid directly, a
- * follow-up probe ray is used instead.
+ * by add_points and the dumps. Where the Rust tests read the voxel grid
+ * directly, a follow-up probe ray or a dump is used instead.
  *
  * Per implementation cases run against every entry of IMPLS (harness.c).
  */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "harness.h"
 
@@ -615,6 +617,229 @@ static void set_multipliers_same_as_constructed(const Impl *impl) {
     }
 }
 
+/* ------------------------------------------------------------ dumps */
+
+static void get_all_points_empty(const Impl *impl) {
+    void *v = plain(impl);
+    EXPECT_NO_VOXELS(get_all_points(v));
+    drop_voxelizer(v);
+    v = compressed(impl);
+    EXPECT_NO_VOXELS(get_all_points(v));
+    drop_voxelizer(v);
+}
+
+static void get_all_points_single_target(const Impl *impl) {
+    void *v = plain(impl);
+    drop_update(from_above(v, 5, 6, 7, 3.0f));
+    EXPECT_VOXELS(get_all_points(v), pi(5, 6, 7, 3));
+    drop_voxelizer(v);
+}
+
+static void get_all_points_zero_intensity_target(const Impl *impl) {
+    void *v = plain(impl);
+    EXPECT_NO_VOXELS(from_above(v, 5, 6, 7, 0.0f));
+    EXPECT_NO_VOXELS(get_all_points(v));
+    drop_voxelizer(v);
+}
+
+static void get_all_points_emptied_page_gone(const Impl *impl) {
+    void *v = plain(impl);
+    drop_update(from_above(v, 0, 0, 0, 2.0f));
+    /* Drops (0, 0, 0) to 0, which empties its page. */
+    drop_update(along_x(v, 0, 5, 0, 0, 2.0f));
+    EXPECT_VOXELS(get_all_points(v), pi(5, 0, 0, 2));
+    drop_voxelizer(v);
+}
+
+static void get_all_points_negative_and_large_coords(const Impl *impl) {
+    const PointI voxels[] = {pi(-1, -1, -1, 1),       pi(-4, 3, -5, 2),
+                             pi(3, 4, -4, 3),         pi(63, -64, 64, 4),
+                             pi(-70000, 70000, 0, 5), pi(1000000, -1000000, -1, 6)};
+    void *v = plain(impl);
+    for (size_t k = 0; k < ARRAY_LEN(voxels); ++k) {
+        seed_at(v, voxels[k].x, voxels[k].y, voxels[k].z, voxels[k].i);
+    }
+    check_update(get_all_points(v), voxels, ARRAY_LEN(voxels), __FILE__, __LINE__);
+    drop_voxelizer(v);
+}
+
+static void get_all_points_with_compress_returns_values(const Impl *impl) {
+    void *v = make(impl, 1.0f, 1, 1, 2, 3, true);
+    /* 2 stays between the thresholds, so only (-5, 6, 7) is constructed. */
+    seed_at(v, 5, 6, 7, 2);
+    seed_at(v, -5, 6, 7, 4);
+    EXPECT_VOXELS(get_all_points(v), pi(5, 6, 7, 2), pi(-5, 6, 7, 4));
+    EXPECT_CONSTRUCTED(v, pi(-5, 6, 7, 1));
+    drop_voxelizer(v);
+}
+
+static void get_all_points_does_not_change_state(const Impl *impl) {
+    for (size_t k = 0; k < ARRAY_LEN(SCENARIO_PARAMS); ++k) {
+        const ScenarioParams *p = &SCENARIO_PARAMS[k];
+        const char *ctx = p->compress ? "compress = true" : "compress = false";
+        void *v = make(impl, 1.0f, 1, 1, p->destroy_threshold, p->construct_threshold,
+                       p->compress);
+        void *untouched = make(impl, 1.0f, 1, 1, p->destroy_threshold, p->construct_threshold,
+                               p->compress);
+        Snapshot first = run_scenario(v, true);
+        Snapshot other = run_scenario(untouched, false);
+        CHECK(first.dump.points_len > 0 && first.dump.constructed_len > 0);
+        Dump again = dump(v);
+        check_dump_eq(&again, &first.dump, ctx, __FILE__, __LINE__);
+        /* The following calls change the same as without the dumps. */
+        Snapshot a = run_scenario(v, false);
+        Snapshot b = run_scenario(untouched, false);
+        check_snapshot_eq(&a, &b, ctx, __FILE__, __LINE__);
+        dump_free(&again);
+        snapshot_free(&first);
+        snapshot_free(&other);
+        snapshot_free(&a);
+        snapshot_free(&b);
+        drop_voxelizer(v);
+        drop_voxelizer(untouched);
+    }
+}
+
+static void get_all_points_compressed_empty(const Impl *impl) {
+    void *v = plain(impl);
+    VoxelGroups groups = get_all_points_compressed(v);
+    CHECK(groups.len == 0);
+    drop_voxel_groups(groups);
+    drop_voxelizer(v);
+    v = compressed(impl);
+    groups = get_all_points_compressed(v);
+    CHECK(groups.len == 0);
+    drop_voxel_groups(groups);
+    drop_voxelizer(v);
+}
+
+static void get_all_points_compressed_single_voxel(const Impl *impl) {
+    void *v = compressed(impl);
+    drop_update(from_above(v, 5, 6, 7, 1.0f));
+    VoxelGroups groups = get_all_points_compressed(v);
+    CHECK(groups.len == 1);
+    CHECK(same_point(groups.data[0].point, pi(0, 0, 0, 0)));
+    /* Page (1, 1, 1) is word 0b111 of the group, voxel (1, 2, 3) of it is
+     * bit 1 + 4 * 2 + 16 * 3. */
+    for (size_t k = 0; k < POINTS_IN_VOXEL_GROUP; ++k) {
+        CHECK(groups.data[0].values[k] == (k == 7 ? 1ull << 57 : 0));
+    }
+    drop_voxel_groups(groups);
+    drop_voxelizer(v);
+}
+
+static void get_all_points_compressed_group_keys(const Impl *impl) {
+    /* A group spans 16 fine pages, 64 voxels, along every axis. */
+    static const struct {
+        Coord voxel, key;
+    } cases[] = {
+        {{-1, -1, -1}, {-1, -1, -1}}, {{64, 0, 0}, {1, 0, 0}},     {{63, 63, 63}, {0, 0, 0}},
+        {{-65, 0, 0}, {-2, 0, 0}},    {{0, -64, 128}, {0, -1, 2}},
+    };
+    for (size_t k = 0; k < ARRAY_LEN(cases); ++k) {
+        const Coord voxel = cases[k].voxel, key = cases[k].key;
+        void *v = compressed(impl);
+        drop_update(from_above(v, voxel.x, voxel.y, voxel.z, 1.0f));
+        VoxelGroups groups = get_all_points_compressed(v);
+        if (groups.len != 1 || !same_point(groups.data[0].point, pi(key.x, key.y, key.z, 0))) {
+            fail(__FILE__, __LINE__, "voxel (%d, %d, %d): %zu groups, expected one keyed "
+                 "(%d, %d, %d)", voxel.x, voxel.y, voxel.z, (size_t)groups.len, key.x, key.y,
+                 key.z);
+        }
+        drop_voxel_groups(groups);
+        EXPECT_CONSTRUCTED(v, pi(voxel.x, voxel.y, voxel.z, 1));
+        drop_voxelizer(v);
+    }
+}
+
+static void get_all_points_compressed_destroyed_group_removed(const Impl *impl) {
+    void *v = compressed(impl);
+    drop_update(from_above(v, 5, 6, 7, 1.0f));
+    /* Destroys (5, 6, 7) and constructs (70, 6, 7) in the next group. */
+    drop_update(along_x(v, 5, 70, 6, 7, 1.0f));
+    VoxelGroups groups = get_all_points_compressed(v);
+    CHECK(groups.len == 1);
+    CHECK(same_point(groups.data[0].point, pi(1, 0, 0, 0)));
+    drop_voxel_groups(groups);
+    EXPECT_CONSTRUCTED(v, pi(70, 6, 7, 1));
+    drop_voxelizer(v);
+}
+
+static void get_all_points_compressed_plain_threshold(const Impl *impl) {
+    /* Without compress a voxel counts as constructed once it reaches
+     * construct_threshold. */
+    void *v = make(impl, 1.0f, 1, 1, 0, 3, false);
+    seed_at(v, 1, 2, 3, 2);
+    seed_at(v, 5, 6, 7, 3);
+    seed_at(v, 70, 0, 0, 4);
+    EXPECT_CONSTRUCTED(v, pi(5, 6, 7, 1), pi(70, 0, 0, 1));
+    drop_voxelizer(v);
+    /* A threshold of 0 still leaves out voxels that are 0. */
+    v = make(impl, 1.0f, 1, 1, 0, 0, false);
+    seed_at(v, 1, 2, 3, 2);
+    seed_at(v, 5, 6, 7, 3);
+    seed_at(v, 70, 0, 0, 4);
+    EXPECT_CONSTRUCTED(v, pi(1, 2, 3, 1), pi(5, 6, 7, 1), pi(70, 0, 0, 1));
+    drop_voxelizer(v);
+}
+
+static int cmp_group(const void *lhs, const void *rhs) {
+    return cmp_point_i(&((const VoxelGroup *)lhs)->point, &((const VoxelGroup *)rhs)->point);
+}
+
+static void get_all_points_compressed_plain_matches_compress_mode(const Impl *impl) {
+    /* With thresholds 0 and 1 no voxel is between them, so both modes agree
+     * on what is constructed. */
+    VoxelGroups groups[2];
+    for (int compress = 0; compress < 2; ++compress) {
+        void *v = make(impl, 1.0f, 1, 1, 0, 1, compress);
+        Snapshot ignored = run_scenario(v, false);
+        snapshot_free(&ignored);
+        groups[compress] = get_all_points_compressed(v);
+        qsort(groups[compress].data, groups[compress].len, sizeof(VoxelGroup), cmp_group);
+        drop_voxelizer(v);
+    }
+    CHECK(groups[0].len > 1);
+    CHECK(groups[0].len == groups[1].len);
+    for (size_t k = 0; k < groups[0].len; ++k) {
+        CHECK(same_point(groups[0].data[k].point, groups[1].data[k].point));
+        CHECK(memcmp(groups[0].data[k].values, groups[1].data[k].values,
+                     sizeof groups[0].data[k].values) == 0);
+    }
+    drop_voxel_groups(groups[0]);
+    drop_voxel_groups(groups[1]);
+}
+
+static void dump_matches_replayed_results(const Impl *impl) {
+    for (size_t k = 0; k < ARRAY_LEN(SCENARIO_PARAMS); ++k) {
+        const ScenarioParams *p = &SCENARIO_PARAMS[k];
+        Snapshot s = scenario(
+            make(impl, 1.0f, 1, 1, p->destroy_threshold, p->construct_threshold, p->compress));
+        size_t len;
+        PointI *replayed = replay(&s, &len);
+        CHECK(len > 0);
+        if (p->compress) {
+            /* The results are blocks, the dump has every constructed voxel
+             * of them. */
+            size_t voxels_len;
+            PointI *voxels = expand_blocks(replayed, len, &voxels_len);
+            check_points(s.dump.constructed, s.dump.constructed_len, voxels, voxels_len,
+                         __FILE__, __LINE__);
+            free(voxels);
+        } else {
+            check_points(s.dump.points, s.dump.points_len, replayed, len, __FILE__, __LINE__);
+            /* Construct threshold 1: every voxel that is not 0 is constructed. */
+            for (size_t n = 0; n < len; ++n) {
+                replayed[n].i = 1;
+            }
+            check_points(s.dump.constructed, s.dump.constructed_len, replayed, len, __FILE__,
+                         __LINE__);
+        }
+        free(replayed);
+        snapshot_free(&s);
+    }
+}
+
 /* --------------------------------------------------------- scenario */
 
 static void scenario_repeatable(const Impl *impl) {
@@ -752,6 +977,44 @@ static void multipliers_null_voxelizer(const Impl *unused) {
     CHECK(same_multipliers(get_multipliers(NULL), mult(0.0f, 0, 0)));
 }
 
+static void dump_null_voxelizer(const Impl *unused) {
+    (void)unused;
+    VoxelsUpdate points = get_all_points(NULL);
+    CHECK(points.data == NULL && points.len == 0);
+    drop_update(points);
+    VoxelGroups groups = get_all_points_compressed(NULL);
+    CHECK(groups.data == NULL && groups.len == 0);
+    drop_voxel_groups(groups);
+}
+
+static void drop_voxel_groups_empty(const Impl *unused) {
+    (void)unused;
+    VoxelGroups empty = {NULL, 0};
+    drop_voxel_groups(empty);
+}
+
+static void dump_helpers_self_check(const Impl *unused) {
+    (void)unused;
+    static VoxelGroup group;
+    /* Word 7 = 0b111 is page (1, 1, 1), 41 = 0b101001 is page (3, 0, 2). */
+    group.point = pi(-1, 0, 2, 0);
+    group.values[7] = 1ull << 57;
+    group.values[41] = 1ull | 1ull << 63;
+    VoxelGroups groups = {&group, 1};
+    size_t len;
+    PointI *voxels = decode_groups(groups, &len);
+    const PointI expected[] = {pi(-64 + 5, 6, 128 + 7, 1), pi(-64 + 12, 0, 128 + 8, 1),
+                               pi(-64 + 15, 3, 128 + 11, 1)};
+    check_points(voxels, len, expected, ARRAY_LEN(expected), __FILE__, __LINE__);
+    free(voxels);
+    const PointI blocks[] = {block(-1, -1, -1, block_bit(-1, -1, -1)),
+                             block(5, 6, 7, block_bit(5, 6, 7) | block_bit(4, 4, 6))};
+    voxels = expand_blocks(blocks, ARRAY_LEN(blocks), &len);
+    const PointI expanded[] = {pi(-1, -1, -1, 1), pi(5, 6, 7, 1), pi(4, 4, 6, 1)};
+    check_points(voxels, len, expanded, ARRAY_LEN(expanded), __FILE__, __LINE__);
+    free(voxels);
+}
+
 static void compress_helpers_self_check(const Impl *unused) {
     (void)unused;
     CHECK(block_bit(3, 3, 1) == 1u << 31);
@@ -826,6 +1089,20 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(get_multipliers_returns_set_values),
     PER_IMPL(set_multipliers_applies_to_next_call),
     PER_IMPL(set_multipliers_same_as_constructed),
+    PER_IMPL(get_all_points_empty),
+    PER_IMPL(get_all_points_single_target),
+    PER_IMPL(get_all_points_zero_intensity_target),
+    PER_IMPL(get_all_points_emptied_page_gone),
+    PER_IMPL(get_all_points_negative_and_large_coords),
+    PER_IMPL(get_all_points_with_compress_returns_values),
+    PER_IMPL(get_all_points_does_not_change_state),
+    PER_IMPL(get_all_points_compressed_empty),
+    PER_IMPL(get_all_points_compressed_single_voxel),
+    PER_IMPL(get_all_points_compressed_group_keys),
+    PER_IMPL(get_all_points_compressed_destroyed_group_removed),
+    PER_IMPL(get_all_points_compressed_plain_threshold),
+    PER_IMPL(get_all_points_compressed_plain_matches_compress_mode),
+    PER_IMPL(dump_matches_replayed_results),
     PER_IMPL(scenario_repeatable),
     PER_IMPL(null_points_zero_count),
     PER_IMPL(null_points_nonzero_count),
@@ -842,6 +1119,9 @@ const TestCase TEST_CASES[] = {
     GLOBAL(drop_update_empty),
     GLOBAL(null_voxelizer),
     GLOBAL(multipliers_null_voxelizer),
+    GLOBAL(dump_null_voxelizer),
+    GLOBAL(drop_voxel_groups_empty),
+    GLOBAL(dump_helpers_self_check),
     GLOBAL(compress_helpers_self_check),
 };
 const size_t TEST_CASE_COUNT = ARRAY_LEN(TEST_CASES);

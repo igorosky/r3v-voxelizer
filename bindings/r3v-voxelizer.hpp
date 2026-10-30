@@ -9,6 +9,12 @@
 namespace r3v {
 namespace voxelizer {
 
+/// Count of bits that encode one coordinate in all points group
+constexpr static const uint32_t ALL_POINTS_GROUP_EDGE_BITS = 4;
+
+/// Count of words in a compressed voxel group, one per fine page
+constexpr static const uintptr_t POINTS_IN_VOXEL_GROUP = (1 << (3 * ALL_POINTS_GROUP_EDGE_BITS));
+
 struct PointI {
   int32_t x;
   int32_t y;
@@ -41,6 +47,23 @@ struct Multipliers {
   uint32_t hit;
   /// Scales the intensity added to the voxel a ray ends in.
   uint32_t target;
+};
+
+/// Constructed voxels of a cube of 16x16x16 fine pages (64x64x64 voxels).
+///
+/// `point` is the key of the group: voxel coordinates shifted right by
+/// `2 + ALL_POINTS_GROUP_EDGE_BITS`, `point.i` is 0. `values[k]` is the
+/// occupancy of the fine page whose offset in the group, bits of x, y and z
+/// interleaved from the lowest one, is `k`. Bit `x + 4 * y + 16 * z` of it is
+/// set when voxel (x, y, z) of the page is constructed.
+struct VoxelGroup {
+  PointI point;
+  uint64_t values[POINTS_IN_VOXEL_GROUP];
+};
+
+struct VoxelGroups {
+  VoxelGroup *data;
+  uintptr_t len;
 };
 
 extern "C" {
@@ -92,7 +115,19 @@ void set_multipliers(void *voxelizer, Multipliers multipliers);
 /// is NULL.
 Multipliers get_multipliers(const void *voxelizer);
 
+/// Every voxel of `voxelizer` that is not 0, with its value. Free it with
+/// `drop_update`. Empty when `voxelizer` is NULL.
+VoxelsUpdate get_all_points(const void *voxelizer);
+
+/// Every constructed voxel of `voxelizer`, as groups holding at least one.
+/// Without `compress` a voxel counts as constructed once it reaches
+/// `construct_threshold`. Free it with `drop_voxel_groups`. Empty when
+/// `voxelizer` is NULL.
+VoxelGroups get_all_points_compressed(const void *voxelizer);
+
 void drop_update(VoxelsUpdate update);
+
+void drop_voxel_groups(VoxelGroups groups);
 
 void drop_voxelizer(void *voxelizer);
 

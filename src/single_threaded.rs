@@ -1,7 +1,8 @@
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    Multipliers, Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -16,13 +17,15 @@ type HashSet<K> = hashbrown::HashSet<K, FxBuildHasher>;
 type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
 
+static_assertions::const_assert!(BITS_FOR_COMPRESSED_ZORDER == ALL_POINTS_GROUP_EDGE_BITS);
+
 #[derive(Debug, Clone)]
 pub struct SingleThreaded {
     voxels: HashMap<ThreeDim, [u32; 2_usize.pow(3 * BITS_FOR_ZORDER)]>,
     compressed_voxels:
         Option<HashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_COMPRESSED_ZORDER)]>>,
     result: HashMap<PagedIndex, u32>,
-    // Pages a voxel of which got zeroed during the current call
+    // Pages a voxel of which got zeroed or stayed 0 during the current call
     maybe_empty: HashSet<ThreeDim>,
     resolution: f32,
     multipliers: Multipliers,
@@ -137,7 +140,7 @@ impl Voxelizer for SingleThreaded {
                         idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
                     )
                 };
-                let bit: u64 = 1 << x << (y << 2) << (z << 4);
+                let bit = Self::word_bit([x, y, z]);
                 // A voxel between the thresholds keeps its state, so a
                 // crossing changes it only when it is in the other one
                 if prev < self.construct_threshold && voxel >= self.construct_threshold {
@@ -174,6 +177,58 @@ impl Voxelizer for SingleThreaded {
     #[inline]
     fn set_multipliers(&mut self, multipliers: Multipliers) {
         self.multipliers = multipliers;
+    }
+    fn get_all_points(&self) -> Vec<PointI> {
+        self.voxels
+            .iter()
+            .flat_map(|(p, v)| {
+                v.iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v != 0)
+                    .map(|(i, v)| self.point_from_index((*p, i), *v))
+            })
+            .collect()
+    }
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+        if let Some(compressed) = self.compressed_voxels.as_ref() {
+            compressed
+                .into_iter()
+                .map(|((x, y, z), v)| CompressedVoxelGroup {
+                    point: PointI {
+                        x: *x,
+                        y: *y,
+                        z: *z,
+                        i: 0,
+                    },
+                    values: (*v).into(),
+                })
+                .collect()
+        } else {
+            // Without compress there is no state between the thresholds, so a
+            // voxel counts as constructed once it reaches `construct_threshold`
+            let mut groups: HashMap<ThreeDim, Box<[u64; POINTS_IN_VOXEL_GROUP]>> =
+                HashMap::default();
+            for (page, values) in &self.voxels {
+                let word = values
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v != 0 && **v >= self.construct_threshold)
+                    .fold(0, |word, (inner, _)| {
+                        word | Self::word_bit(self.zorder.coord_of(inner as u64))
+                    });
+                if word != 0 {
+                    let (key, inner) = self.compressed_index(*page);
+                    groups.entry(key).or_insert_with(|| Box::new([0; _]))[inner] = word;
+                }
+            }
+            groups
+                .into_iter()
+                .map(|((x, y, z), values)| CompressedVoxelGroup {
+                    point: PointI { x, y, z, i: 0 },
+                    values,
+                })
+                .collect()
+        }
     }
     #[inline]
     fn multipliers(&self) -> Multipliers {
@@ -253,6 +308,11 @@ impl SingleThreaded {
             ]) as usize,
         )
     }
+    /// Bit of the voxel at `[x, y, z]` of a fine page in its compressed word.
+    #[inline]
+    fn word_bit([x, y, z]: [u16; 3]) -> u64 {
+        1 << x << (y << 2) << (z << 4)
+    }
     /// Removes pages zeroed during the call that are empty (all voxels 0 and
     /// none constructed) and compressed pages from `emptied_compressed`
     /// that are empty (all words 0).
@@ -287,6 +347,10 @@ impl SingleThreaded {
         entry[idx.1] = entry[idx.1]
             .saturating_add(point.i * self.multipliers.target)
             .min(self.max_value);
+        // A target adding nothing (or capped at 0) can leave a new page all 0
+        if entry[idx.1] == 0 {
+            self.maybe_empty.insert(idx.0);
+        }
     }
     fn ray_march(
         &mut self,

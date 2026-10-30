@@ -5,7 +5,8 @@ use rayon::{
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    Multipliers, Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
+    Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -20,13 +21,15 @@ type DashSet<K> = dashmap::DashSet<K, FxBuildHasher>;
 type ThreeDim = (i32, i32, i32);
 type PagedIndex = (ThreeDim, usize);
 
+static_assertions::const_assert!(BITS_FOR_COMPRESSED_ZORDER == ALL_POINTS_GROUP_EDGE_BITS);
+
 #[derive(Debug)]
 pub struct MultiThreaded {
     voxels: DashMap<ThreeDim, [u32; 2_usize.pow(3 * BITS_FOR_ZORDER)]>,
     compressed_voxels:
         Option<DashMap<ThreeDim, [u64; 2_usize.pow(3 * BITS_FOR_COMPRESSED_ZORDER)]>>,
     result: DashMap<PagedIndex, u32>,
-    // Pages a voxel of which got zeroed during the current call
+    // Pages a voxel of which got zeroed or stayed 0 during the current call
     maybe_empty: DashSet<ThreeDim>,
     resolution: f32,
     multipliers: Multipliers,
@@ -145,7 +148,7 @@ impl Voxelizer for MultiThreaded {
                             idx.0.2 >> BITS_FOR_COMPRESSED_ZORDER,
                         )
                     };
-                    let bit: u64 = 1 << x << (y << 2) << (z << 4);
+                    let bit = Self::word_bit([x, y, z]);
                     // A voxel between the thresholds keeps its state, so a
                     // crossing changes it only when it is in the other one
                     if prev < self.construct_threshold && voxel >= self.construct_threshold {
@@ -183,6 +186,67 @@ impl Voxelizer for MultiThreaded {
     #[inline]
     fn set_multipliers(&mut self, multipliers: Multipliers) {
         self.multipliers = multipliers;
+    }
+    fn get_all_points(&self) -> Vec<PointI> {
+        self.thread_pool.install(|| {
+            self.voxels
+                .iter()
+                .par_bridge()
+                .flat_map_iter(|page| {
+                    let (p, values) = (*page.key(), *page.value());
+                    values
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(_, v)| *v != 0)
+                        .map(move |(i, v)| self.point_from_index((p, i), v))
+                })
+                .collect()
+        })
+    }
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+        self.thread_pool.install(|| {
+            if let Some(compressed) = self.compressed_voxels.as_ref() {
+                compressed
+                    .iter()
+                    .par_bridge()
+                    .map(|group| {
+                        let (x, y, z) = *group.key();
+                        CompressedVoxelGroup {
+                            point: PointI { x, y, z, i: 0 },
+                            values: Box::new(*group.value()),
+                        }
+                    })
+                    .collect()
+            } else {
+                // Without compress there is no state between the thresholds,
+                // so a voxel counts as constructed once it reaches
+                // `construct_threshold`
+                let groups: DashMap<ThreeDim, Box<[u64; POINTS_IN_VOXEL_GROUP]>> =
+                    DashMap::default();
+                self.voxels.iter().par_bridge().for_each(|page| {
+                    let word = page
+                        .value()
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, v)| **v != 0 && **v >= self.construct_threshold)
+                        .fold(0, |word, (inner, _)| {
+                            word | Self::word_bit(self.zorder.coord_of(inner as u64))
+                        });
+                    if word != 0 {
+                        let (key, inner) = self.compressed_index(*page.key());
+                        groups.entry(key).or_insert_with(|| Box::new([0; _]))[inner] = word;
+                    }
+                });
+                groups
+                    .into_iter()
+                    .par_bridge()
+                    .map(|((x, y, z), values)| CompressedVoxelGroup {
+                        point: PointI { x, y, z, i: 0 },
+                        values,
+                    })
+                    .collect()
+            }
+        })
     }
     #[inline]
     fn multipliers(&self) -> Multipliers {
@@ -272,6 +336,11 @@ impl MultiThreaded {
             ]) as usize,
         )
     }
+    /// Bit of the voxel at `[x, y, z]` of a fine page in its compressed word.
+    #[inline]
+    fn word_bit([x, y, z]: [u16; 3]) -> u64 {
+        1 << x << (y << 2) << (z << 4)
+    }
     /// Removes pages zeroed during the call that are empty (all voxels 0 and
     /// none constructed) and compressed pages from `emptied_compressed`
     /// that are empty (all words 0).
@@ -302,6 +371,10 @@ impl MultiThreaded {
         entry[idx.1] = entry[idx.1]
             .saturating_add(point.i * self.multipliers.target)
             .min(self.max_value);
+        // A target adding nothing (or capped at 0) can leave a new page all 0
+        if entry[idx.1] == 0 {
+            self.maybe_empty.insert(idx.0);
+        }
     }
     fn ray_march(&self, mut sensor_pos: PointI, sensor_pos_divided: &PointF, mut point: PointF) {
         // http://www.cse.yorku.ca/~amana/research/grid.pdf
@@ -584,10 +657,10 @@ mod test {
             |params, threads| MultiThreaded::new(params, threads).expect("thread pool must build");
         for switch in [None, Some(SWITCHED)] {
             for params in SCENARIO_PARAMS {
-                let expected = scenario_with(make(params, 1), switch);
+                let expected = scenario_with(make(params.clone(), 1), switch);
                 assert!(expected.results.iter().all(|r| !r.is_empty()));
                 for threads in [2, 4, 8, 16] {
-                    let got = scenario_with(make(params, threads), switch);
+                    let got = scenario_with(make(params.clone(), threads), switch);
                     assert_snapshot_eq(
                         &got,
                         &expected,

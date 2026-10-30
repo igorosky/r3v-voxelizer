@@ -16,10 +16,11 @@
 import process from "node:process";
 
 import {
-    CLASS_OF_FEATURE, FEATURES, SCENARIO_PARAMS, SEED, SINGLE, UNSUPPORTED_CLASSES, WGPU,
-    WGPU_TEST_BUCKETS, addPoint, alongX, block, blockBit, check, checkCoords, checkRay, checkUpdate,
-    compressed, coords, expectNoVoxels, expectVoxels, fail, fmt, fromAbove, main, make, pf, pi, plain,
-    rv, same, scenario, seed, sensor, throwsError,
+    CLASS_OF_FEATURE, FEATURES, POINTS_IN_VOXEL_GROUP, SCENARIO_PARAMS, SEED, SINGLE,
+    UNSUPPORTED_CLASSES, WGPU, WGPU_TEST_BUCKETS, addPoint, alongX, block, blockBit, check,
+    checkConstructed, checkCoords, checkRay, checkUpdate, compressed, coords, decodeGroups, dump,
+    expandBlocks, expectNoVoxels, expectVoxels, fail, fmt, fromAbove, main, make, pf, pi, plain,
+    replay, rv, same, scenario, seed, sensor, throwsError, typeName,
 } from "./harness.mjs";
 
 const U32_MAX = 2 ** 32 - 1;
@@ -28,7 +29,7 @@ const U32_MAX = 2 ** 32 - 1;
 
 /** Names of the classes the module must have with the enabled features. */
 function enabledClasses() {
-    return ["Multipliers", "PointF", "PointI", ...Object.entries(CLASS_OF_FEATURE)
+    return ["CompressedVoxelGroup", "Multipliers", "PointF", "PointI", ...Object.entries(CLASS_OF_FEATURE)
         .filter(([feature]) => FEATURES.has(feature))
         .map(([, cls]) => cls)];
 }
@@ -315,6 +316,9 @@ async function free_makes_object_unusable(impl) {
     const sensorPos = sensor();
     const points = [pf(3.5, 0.5, 0.5, 1.0)];
     await throwsError(() => a.add_points(sensorPos, points), "add_points on a freed voxelizer");
+    await throwsError(() => a.get_all_points(), "get_all_points on a freed voxelizer");
+    await throwsError(() => a.get_all_points_compressed(),
+        "get_all_points_compressed on a freed voxelizer");
     // Other instances are not affected.
     await expectVoxels(addPoint(b, sensor(), pf(3.5, 0.5, 0.5, 1.0)), pi(3, 0, 0, 1));
 }
@@ -863,12 +867,219 @@ async function set_multipliers_same_as_constructed(impl) {
     }
 }
 
+// --------------------------------------------------------------- dumps
+
+async function get_all_points_result_types(impl) {
+    const v = await plain(impl);
+    await fromAbove(v, 5, 6, 7, 3.0);
+    const pointsResult = v.get_all_points();
+    check(pointsResult instanceof Promise === impl.isAsync,
+        `get_all_points returned ${impl.isAsync ? "no" : "a"} Promise`);
+    const points = await pointsResult;
+    check(Array.isArray(points) && points.length === 1,
+        `get_all_points returned ${typeName(points)} of ${points?.length}`);
+    check(points[0] instanceof rv.PointI, "get_all_points did not return PointI objects");
+    const groupsResult = v.get_all_points_compressed();
+    check(groupsResult instanceof Promise === impl.isAsync,
+        `get_all_points_compressed returned ${impl.isAsync ? "no" : "a"} Promise`);
+    const groups = await groupsResult;
+    check(Array.isArray(groups) && groups.length === 1,
+        `get_all_points_compressed returned ${typeName(groups)} of ${groups?.length}`);
+    const [group] = groups;
+    check(group instanceof rv.CompressedVoxelGroup,
+        "get_all_points_compressed did not return CompressedVoxelGroup objects");
+    check(group.point instanceof rv.PointI, `group key is ${typeName(group.point)}`);
+    check(group.values instanceof BigUint64Array && group.values.length === POINTS_IN_VOXEL_GROUP,
+        `group words are ${typeName(group.values)} of ${group.values?.length}`);
+    // The results are owned by JS and outlive the voxelizer.
+    v.free();
+    checkCoords(points[0], [5, 6, 7, 3], "PointI after freeing its voxelizer");
+    checkCoords(group.point, [0, 0, 0, 0], "group key after freeing its voxelizer");
+    check(same(decodeGroups(groups), [pi(5, 6, 7, 1)]), "group after freeing its voxelizer");
+}
+
+async function compressed_voxel_group_returns_copies(impl) {
+    const v = await compressed(impl);
+    await fromAbove(v, 5, 6, 7, 1.0);
+    const [group] = await v.get_all_points_compressed();
+    // Both properties give copies, changing them leaves the group as it was.
+    group.point.x = 9;
+    group.values[7] = 0n;
+    checkCoords(group.point, [0, 0, 0, 0], "group key after changing a copy");
+    check(group.values[7] === 1n << 57n, "group words changed through a copy");
+    await throwsError(() => {
+        group.point = new rv.PointI(1, 2, 3, 0);
+    }, "setting the read only point");
+    checkCoords(group.point, [0, 0, 0, 0], "group key after setting it");
+    group.free();
+    await throwsError(() => group.values, "reading the words of a freed group");
+}
+
+async function get_all_points_empty(impl) {
+    await expectNoVoxels((await plain(impl)).get_all_points());
+    await expectNoVoxels((await compressed(impl)).get_all_points());
+}
+
+async function get_all_points_single_target(impl) {
+    const v = await plain(impl);
+    await fromAbove(v, 5, 6, 7, 3.0);
+    await expectVoxels(v.get_all_points(), pi(5, 6, 7, 3));
+}
+
+async function get_all_points_zero_intensity_target(impl) {
+    const v = await plain(impl);
+    await expectNoVoxels(fromAbove(v, 5, 6, 7, 0.0));
+    await expectNoVoxels(v.get_all_points());
+}
+
+async function get_all_points_emptied_page_gone(impl) {
+    const v = await plain(impl);
+    await fromAbove(v, 0, 0, 0, 2.0);
+    // Drops (0, 0, 0) to 0, which empties its page.
+    await alongX(v, 0, 5, 0, 0, 2.0);
+    await expectVoxels(v.get_all_points(), pi(5, 0, 0, 2));
+}
+
+async function get_all_points_negative_and_large_coords(impl) {
+    const voxels = [pi(-1, -1, -1, 1), pi(-4, 3, -5, 2), pi(3, 4, -4, 3), pi(63, -64, 64, 4),
+        pi(-70000, 70000, 0, 5), pi(1000000, -1000000, -1, 6)];
+    const v = await plain(impl);
+    for (const [x, y, z, i] of voxels) {
+        await seed(v, 1.0, x, y, z, i);
+    }
+    await checkUpdate(v.get_all_points(), voxels);
+}
+
+async function get_all_points_with_compress_returns_values(impl) {
+    const v = await make(impl, 1.0, 1, 1, 2, 3, true);
+    // 2 stays between the thresholds, so only (-5, 6, 7) is constructed.
+    await seed(v, 1.0, 5, 6, 7, 2.0);
+    await seed(v, 1.0, -5, 6, 7, 4.0);
+    await expectVoxels(v.get_all_points(), pi(5, 6, 7, 2), pi(-5, 6, 7, 4));
+    await checkConstructed(v, pi(-5, 6, 7, 1));
+}
+
+async function get_all_points_does_not_change_state(impl) {
+    for (const [destroy, construct, compress] of SCENARIO_PARAMS) {
+        const v = await make(impl, 1.0, 1, 1, destroy, construct, compress);
+        const untouched = await make(impl, 1.0, 1, 1, destroy, construct, compress);
+        const first = await scenario(v);
+        await scenario(untouched, false);
+        check(first.dump.points.length > 0 && first.dump.constructed.length > 0,
+            `compress = ${compress}: empty dumps`);
+        check(same(await dump(v), first.dump), `compress = ${compress}: dumps differ`);
+        // The following calls change the same as without the dumps.
+        check(same(await scenario(v, false), await scenario(untouched, false)),
+            `compress = ${compress}: dumping changed later calls`);
+    }
+}
+
+async function get_all_points_compressed_empty(impl) {
+    for (const v of [await plain(impl), await compressed(impl)]) {
+        const groups = await v.get_all_points_compressed();
+        check(Array.isArray(groups) && groups.length === 0, `dumped ${groups?.length} groups`);
+    }
+}
+
+async function get_all_points_compressed_single_voxel(impl) {
+    const v = await compressed(impl);
+    await fromAbove(v, 5, 6, 7, 1.0);
+    const groups = await v.get_all_points_compressed();
+    check(groups.length === 1, `${groups.length} groups`);
+    checkCoords(groups[0].point, [0, 0, 0, 0], "group key");
+    // Page (1, 1, 1) is word 0b111 of the group, voxel (1, 2, 3) of it is
+    // bit 1 + 4 * 2 + 16 * 3.
+    const words = [];
+    groups[0].values.forEach((word, k) => {
+        if (word !== 0n) {
+            words.push([k, word]);
+        }
+    });
+    check(words.length === 1 && words[0][0] === 0b111 && words[0][1] === 1n << 57n,
+        `words ${words.map(([k, word]) => `${k}: ${word}`)}`);
+}
+
+async function get_all_points_compressed_group_keys(impl) {
+    // A group spans 16 fine pages, 64 voxels, along every axis.
+    for (const [voxel, key] of [[[-1, -1, -1], [-1, -1, -1]], [[64, 0, 0], [1, 0, 0]],
+        [[63, 63, 63], [0, 0, 0]], [[-65, 0, 0], [-2, 0, 0]], [[0, -64, 128], [0, -1, 2]]]) {
+        const v = await compressed(impl);
+        await fromAbove(v, ...voxel, 1.0);
+        const groups = await v.get_all_points_compressed();
+        const keys = groups.map((group) => coords(group.point));
+        check(same(keys, [[...key, 0]]), `voxel ${fmt(voxel)}: keys ${fmt(keys)}`);
+        check(same(decodeGroups(groups), [pi(...voxel, 1)]), `voxel ${fmt(voxel)}`);
+    }
+}
+
+async function get_all_points_compressed_destroyed_group_removed(impl) {
+    const v = await compressed(impl);
+    await fromAbove(v, 5, 6, 7, 1.0);
+    // Destroys (5, 6, 7) and constructs (70, 6, 7) in the next group.
+    await alongX(v, 5, 70, 6, 7, 1.0);
+    const groups = await v.get_all_points_compressed();
+    check(same(groups.map((group) => coords(group.point)), [[1, 0, 0, 0]]), "group keys");
+    check(same(decodeGroups(groups), [pi(70, 6, 7, 1)]), "constructed voxels");
+}
+
+async function get_all_points_compressed_plain_threshold(impl) {
+    // Without compress a voxel counts as constructed once it reaches
+    // construct_threshold.
+    const voxels = [[1, 2, 3, 2.0], [5, 6, 7, 3.0], [70, 0, 0, 4.0]];
+    let v = await make(impl, 1.0, 1, 1, 0, 3, false);
+    for (const voxel of voxels) {
+        await seed(v, 1.0, ...voxel);
+    }
+    await checkConstructed(v, pi(5, 6, 7, 1), pi(70, 0, 0, 1));
+    // A threshold of 0 still leaves out voxels that are 0.
+    v = await make(impl, 1.0, 1, 1, 0, 0, false);
+    for (const voxel of voxels) {
+        await seed(v, 1.0, ...voxel);
+    }
+    await checkConstructed(v, pi(1, 2, 3, 1), pi(5, 6, 7, 1), pi(70, 0, 0, 1));
+}
+
+async function get_all_points_compressed_plain_matches_compress_mode(impl) {
+    // With thresholds 0 and 1 no voxel is between them, so both modes agree
+    // on what is constructed.
+    const groups = async (compress) => {
+        const v = await make(impl, 1.0, 1, 1, 0, 1, compress);
+        await scenario(v, false);
+        return (await v.get_all_points_compressed())
+            .map((group) => [coords(group.point), group.values.join()])
+            .sort((a, b) => (a[0].join() < b[0].join() ? -1 : 1));
+    };
+    const plainGroups = await groups(false);
+    check(plainGroups.length > 1, `${plainGroups.length} groups`);
+    check(same(plainGroups, await groups(true)), "the modes dump different groups");
+}
+
+async function dump_matches_replayed_results(impl) {
+    for (const [destroy, construct, compress] of SCENARIO_PARAMS) {
+        const { results, dump: dumped } =
+            await scenario(await make(impl, 1.0, 1, 1, destroy, construct, compress));
+        const replayed = replay(results);
+        check(replayed.length > 0, `compress = ${compress}: nothing to replay`);
+        if (compress) {
+            // The results are blocks, the dump has every constructed voxel of
+            // them.
+            check(same(dumped.constructed, expandBlocks(replayed)), "compress = true: differs");
+        } else {
+            check(same(dumped.points, replayed), "compress = false: get_all_points differs");
+            // Construct threshold 1: every voxel that is not 0 is
+            // constructed.
+            check(same(dumped.constructed, replayed.map(([x, y, z]) => pi(x, y, z, 1))),
+                "compress = false: get_all_points_compressed differs");
+        }
+    }
+}
+
 // ------------------------------------------------------------ scenario
 
 async function scenario_repeatable(impl) {
     for (const [destroy, construct, compress] of SCENARIO_PARAMS) {
         const a = await scenario(await make(impl, 1.0, 1, 1, destroy, construct, compress));
-        a.forEach((update, call) => {
+        a.results.forEach((update, call) => {
             check(update.length > 0, `compress = ${compress}: call ${call} changed nothing`);
         });
         const b = await scenario(await make(impl, 1.0, 1, 1, destroy, construct, compress));
@@ -881,7 +1092,7 @@ async function scenario_repeatable(impl) {
 async function single_and_wgpu_agree() {
     for (const [destroy, construct, compress] of SCENARIO_PARAMS) {
         const expected = await scenario(await make(SINGLE, 1.0, 1, 1, destroy, construct, compress));
-        expected.forEach((update, call) => {
+        expected.results.forEach((update, call) => {
             check(update.length > 0, `compress = ${compress}: call ${call} changed nothing`);
         });
         const got = await scenario(await make(WGPU, 1.0, 1, 1, destroy, construct, compress));
@@ -939,6 +1150,30 @@ async function wgpu_multipliers_while_running_rejects() {
     await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0)), pi(3, 0, 0, 7));
 }
 
+async function wgpu_dump_while_running_rejects() {
+    // A call holds the voxelizer until it resolves: dumping while points are
+    // added rejects, as does any other call while a dump runs, and none of
+    // them changes anything.
+    const v = await plain(WGPU);
+    const adding = addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0));
+    await throwsError(() => v.get_all_points(), "get_all_points while add_points runs");
+    await throwsError(() => v.get_all_points_compressed(),
+        "get_all_points_compressed while add_points runs");
+    await expectVoxels(adding, pi(3, 0, 0, 1));
+    const dumping = v.get_all_points();
+    // Async calls start from a microtask, this lets the dump take the
+    // voxelizer.
+    await null;
+    await throwsError(() => v.get_multipliers(), "get_multipliers while get_all_points runs");
+    await throwsError(() => addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0)),
+        "add_points while get_all_points runs");
+    await throwsError(() => v.get_all_points_compressed(),
+        "get_all_points_compressed while get_all_points runs");
+    await expectVoxels(dumping, pi(3, 0, 0, 1));
+    await expectVoxels(addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0)), pi(3, 0, 0, 2));
+    await checkConstructed(v, pi(3, 0, 0, 1));
+}
+
 function compress_helpers_self_check() {
     check(blockBit(3, 3, 1) === 2 ** 31);
     check(blockBit(3, 3, 3) === 2 ** 31);
@@ -946,6 +1181,27 @@ function compress_helpers_self_check() {
     check(same(block(5, 9, 7, 0), pi(4, 8, 6, 0)));
     check(same(block(-1, -1, -1, blockBit(-1, -1, -1)), pi(-4, -4, -2, 2 ** 31)));
     check(same(block(-5, -9, -6, 0), pi(-8, -12, -6, 0)));
+}
+
+function dump_helpers_self_check() {
+    // decodeGroups only reads point and values, as a CompressedVoxelGroup
+    // cannot be built from JS this stands in for one.
+    const values = new BigUint64Array(POINTS_IN_VOXEL_GROUP);
+    // Word 7 = 0b111 is page (1, 1, 1), 41 = 0b101001 is page (3, 0, 2).
+    values[7] = 1n << 57n;
+    values[41] = 1n | 1n << 63n;
+    const group = Object.create(rv.CompressedVoxelGroup.prototype, {
+        point: { value: new rv.PointI(-1, 0, 2, 0) },
+        values: { value: values },
+    });
+    check(same(decodeGroups([group]), [pi(-64 + 5, 6, 128 + 7, 1), pi(-64 + 12, 0, 128 + 8, 1),
+        pi(-64 + 15, 3, 128 + 11, 1)]), "decodeGroups");
+    const blocks = [block(-1, -1, -1, blockBit(-1, -1, -1)),
+        block(5, 6, 7, blockBit(5, 6, 7) | blockBit(4, 4, 6))];
+    check(same(expandBlocks(blocks), [pi(-1, -1, -1, 1), pi(4, 4, 6, 1), pi(5, 6, 7, 1)]),
+        "expandBlocks");
+    check(same(replay([[pi(1, 0, 0, 3), pi(2, 0, 0, 4)], [pi(1, 0, 0, 0), pi(3, 0, 0, 5)]]),
+        [pi(2, 0, 0, 4), pi(3, 0, 0, 5)]), "replay");
 }
 
 // --------------------------------------------------------------- table
@@ -1044,6 +1300,22 @@ const TEST_CASES = [
     perImpl(set_multipliers_leaves_input_usable),
     perImpl(set_multipliers_rejects_bad_argument),
     perImpl(set_multipliers_same_as_constructed),
+    perImpl(get_all_points_result_types),
+    perImpl(compressed_voxel_group_returns_copies),
+    perImpl(get_all_points_empty),
+    perImpl(get_all_points_single_target),
+    perImpl(get_all_points_zero_intensity_target),
+    perImpl(get_all_points_emptied_page_gone),
+    perImpl(get_all_points_negative_and_large_coords),
+    perImpl(get_all_points_with_compress_returns_values),
+    perImpl(get_all_points_does_not_change_state),
+    perImpl(get_all_points_compressed_empty),
+    perImpl(get_all_points_compressed_single_voxel),
+    perImpl(get_all_points_compressed_group_keys),
+    perImpl(get_all_points_compressed_destroyed_group_removed),
+    perImpl(get_all_points_compressed_plain_threshold),
+    perImpl(get_all_points_compressed_plain_matches_compress_mode),
+    perImpl(dump_matches_replayed_results),
     perImpl(scenario_repeatable),
     once(single_and_wgpu_agree, "single_threaded", "wgpu"),
     once(wgpu_create_is_async, "wgpu"),
@@ -1051,7 +1323,9 @@ const TEST_CASES = [
     once(wgpu_memory_size_grows, "wgpu"),
     once(wgpu_overlapping_add_points_rejects, "wgpu"),
     once(wgpu_multipliers_while_running_rejects, "wgpu"),
+    once(wgpu_dump_while_running_rejects, "wgpu"),
     once(compress_helpers_self_check),
+    once(dump_helpers_self_check),
 ];
 
 // Exits right away: a live WebGPU instance would keep Node.js running.

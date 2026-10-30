@@ -18,8 +18,19 @@ pub use single_threaded::SingleThreaded;
 #[cfg(feature = "wgpu")]
 pub use wgpu::WgpuAccelerated;
 
+/// Count of bits that encode one coordinate in all points group
+pub const ALL_POINTS_GROUP_EDGE_BITS: u32 = 4;
+/// Count of words in a compressed voxel group, one per fine page
+pub const POINTS_IN_VOXEL_GROUP: usize = 1 << (3 * ALL_POINTS_GROUP_EDGE_BITS);
+
 pub trait Voxelizer {
     fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI>;
+    fn get_all_points(&self) -> Vec<PointI> {
+        unimplemented!()
+    }
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+        unimplemented!()
+    }
     /// Multipliers used by the following [`Voxelizer::add_points`] calls.
     /// Voxels keep the values they got so far.
     fn set_multipliers(&mut self, multipliers: Multipliers);
@@ -50,7 +61,7 @@ pub struct Multipliers {
 }
 
 /// Parameters shared by every [`Voxelizer`] implementation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VoxelizerParams {
     /// Size of a voxel, point coordinates are divided by it.
     pub resolution: f32,
@@ -69,4 +80,19 @@ pub struct VoxelizerParams {
     /// Reports constructed and destroyed voxels as bitmasks of 4x4x2 blocks
     /// instead of voxel values.
     pub compress: bool,
+}
+
+#[cfg_attr(feature = "js", wasm_bindgen::prelude::wasm_bindgen)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(from_py_object, module = "r3v_voxelizer")
+)]
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressedVoxelGroup {
+    /// i elem is unused but this would be wasted anyway because of alignment
+    #[cfg_attr(feature = "js", wasm_bindgen(getter_with_clone, readonly))]
+    pub point: PointI,
+    #[cfg_attr(feature = "js", wasm_bindgen(skip))]
+    pub values: Box<[u64; POINTS_IN_VOXEL_GROUP]>,
 }

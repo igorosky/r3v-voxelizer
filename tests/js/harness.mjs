@@ -135,7 +135,7 @@ export function checkCoords(point, expected, what) {
     check(same(got, expected), `${what}: is ${fmt(got)}, expected ${fmt(expected)}`);
 }
 
-function typeName(value) {
+export function typeName(value) {
     return value === null || value === undefined ? String(value) : value.constructor?.name ?? typeof value;
 }
 
@@ -148,19 +148,19 @@ function compareTuples(a, b) {
     return 0;
 }
 
-/** Checks the types of what add_points returned (once resolved) and gives
- * its points as sorted [x, y, z, i] arrays. */
+/** Checks the types of what add_points (or get_all_points) returned (once
+ * resolved) and gives its points as sorted [x, y, z, i] arrays. */
 export function voxels(update, context = "") {
     const prefix = context ? `${context}: ` : "";
-    check(Array.isArray(update), `${prefix}add_points returned ${typeName(update)}, not an Array`);
+    check(Array.isArray(update), `${prefix}returned ${typeName(update)}, not an Array`);
     for (const point of update) {
         check(point instanceof rv.PointI, `${prefix}update holds ${typeName(point)}, not PointI`);
     }
     return update.map(coords).sort(compareTuples);
 }
 
-/** Compares what add_points returned (or the Promise of it) with
- * [x, y, z, i] arrays, ignoring order. */
+/** Compares what add_points (or get_all_points) returned (or the Promise of
+ * it) with [x, y, z, i] arrays, ignoring order. */
 export async function checkUpdate(update, expected, context = "") {
     const got = voxels(await update, context);
     const want = [...expected].sort(compareTuples);
@@ -284,6 +284,88 @@ export function block(x, y, z, mask) {
     return pi(x & ~3, y & ~3, z & ~1, mask);
 }
 
+/** Every voxel set in the 32 bit packs of blocks, as sorted [x, y, z, 1]
+ * arrays. */
+export function expandBlocks(blocks) {
+    const points = [];
+    for (const [x, y, z, mask] of blocks) {
+        for (let bit = 0; bit < 32; bit++) {
+            if ((mask >>> bit) & 1) {
+                points.push(pi(x + (bit & 3), y + ((bit >> 2) & 3), z + (bit >> 4), 1));
+            }
+        }
+    }
+    return points.sort(compareTuples);
+}
+
+// -------------------------------------------------------- dump helpers
+//
+// get_all_points_compressed returns one CompressedVoxelGroup per 64x64x64
+// voxel cube holding a constructed voxel: a word per 4x4x4 fine page in
+// z-order, bit x + 4 * y + 16 * z of it set when voxel (x, y, z) of the page
+// is constructed.
+
+// ALL_POINTS_GROUP_EDGE_BITS of the crate.
+const GROUP_EDGE_BITS = 4;
+export const POINTS_IN_VOXEL_GROUP = 2 ** (3 * GROUP_EDGE_BITS);
+
+/** Checks the types of what get_all_points_compressed returned (once
+ * resolved) and gives every voxel set in it as sorted [x, y, z, 1] arrays
+ * (port of `decode_groups` in src/test.rs). */
+export function decodeGroups(groups) {
+    check(Array.isArray(groups),
+        `get_all_points_compressed returned ${typeName(groups)}, not an Array`);
+    const pages = 2 ** GROUP_EDGE_BITS;
+    const points = [];
+    for (const group of groups) {
+        check(group instanceof rv.CompressedVoxelGroup,
+            `get_all_points_compressed holds ${typeName(group)}, not CompressedVoxelGroup`);
+        const [x, y, z, i] = coords(group.point);
+        check(i === 0, `group key ${fmt([x, y, z, i])} has i != 0`);
+        const values = group.values;
+        check(values instanceof BigUint64Array && values.length === POINTS_IN_VOXEL_GROUP,
+            `group words are ${typeName(values)} of ${values?.length}`);
+        values.forEach((word, k) => {
+            if (word === 0n) {
+                return;
+            }
+            // Bits of x, y and z of the page offset interleave from the
+            // lowest one.
+            const offset = [0, 0, 0];
+            for (let b = 0; b < 3 * GROUP_EDGE_BITS; b++) {
+                offset[b % 3] |= ((k >> b) & 1) << Math.floor(b / 3);
+            }
+            // Multiplied, shifting would wrap around at 32 bits.
+            const page = [x * pages + offset[0], y * pages + offset[1], z * pages + offset[2]];
+            for (let bit = 0; bit < 64; bit++) {
+                if ((word >> BigInt(bit)) & 1n) {
+                    points.push(pi(page[0] * 4 + (bit & 3), page[1] * 4 + ((bit >> 2) & 3),
+                        page[2] * 4 + (bit >> 4), 1));
+                }
+            }
+        });
+    }
+    return points.sort(compareTuples);
+}
+
+/** Compares the decoded compressed dump of voxelizer with [x, y, z, 1]
+ * arrays, ignoring order. */
+export async function checkConstructed(voxelizer, ...expected) {
+    const got = decodeGroups(await voxelizer.get_all_points_compressed());
+    const want = [...expected].sort(compareTuples);
+    check(same(got, want), `constructed voxels differ\n     got: ${fmt(got)}\nexpected: ${fmt(want)}`);
+}
+
+/** Resolves to both dumps of voxelizer: get_all_points as sorted
+ * [x, y, z, i] arrays and the voxels set in get_all_points_compressed (see
+ * decodeGroups). */
+export async function dump(voxelizer) {
+    return {
+        points: voxels(await voxelizer.get_all_points(), "get_all_points"),
+        constructed: decodeGroups(await voxelizer.get_all_points_compressed()),
+    };
+}
+
 // -------------------------------------------------------------- scenario
 //
 // A deterministic workload used to compare runs (port of `scenario` in
@@ -319,16 +401,29 @@ function cubeFaces(dist, half, step) {
     return coords;
 }
 
-/** Runs the scenario and resolves to the sorted output of every call. */
-export async function scenario(voxelizer) {
+/** Runs the scenario and resolves to {results, dump}: the sorted output of
+ * every call and the dumps after the last call (null unless withDump). */
+export async function scenario(voxelizer, withDump = true) {
     const rng = new Lcg(0x5EED);
-    const snapshot = [];
+    const results = [];
     for (const [dist, half, step, maxI] of [[50, 20, 4, 5], [100, 40, 8, 3]]) {
         const points = cubeFaces(dist, half, step)
             .map(([x, y, z]) => pf(x + 0.5, y + 0.5, z + 0.5, 1 + rng.next() % maxI));
-        snapshot.push(voxels(await voxelizer.add_points(sensor(), points)));
+        results.push(voxels(await voxelizer.add_points(sensor(), points)));
     }
-    return snapshot;
+    return { results, dump: withDump ? await dump(voxelizer) : null };
+}
+
+/** Last value every voxel (or block in compress mode) got in results,
+ * without the zeroed ones, as sorted [x, y, z, i] arrays. */
+export function replay(results) {
+    const last = new Map();
+    for (const result of results) {
+        for (const [x, y, z, i] of result) {
+            last.set(`${x},${y},${z}`, pi(x, y, z, i));
+        }
+    }
+    return [...last.values()].filter(([, , , i]) => i !== 0).sort(compareTuples);
 }
 
 // ------------------------------------------------------------------ main

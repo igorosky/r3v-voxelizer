@@ -101,8 +101,35 @@ mod r3v_voxelizer {
         }
     }
 
+    #[pyo3::pymethods]
+    impl CompressedVoxelGroup {
+        /// Raises ValueError unless `values` holds a word for every fine page
+        /// of the group (4096).
+        #[new]
+        pub fn new(point: PointI, values: Vec<u64>) -> pyo3::PyResult<Self> {
+            match values.into_boxed_slice().try_into() {
+                Ok(values) => Ok(Self { point, values }),
+                Err(values) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "values holds {} words, a group holds {}",
+                    values.len(),
+                    crate::POINTS_IN_VOXEL_GROUP
+                ))),
+            }
+        }
+        /// Key of the group: voxel coordinates shifted right by 6, i is 0.
+        pub fn point(&self) -> PointI {
+            self.point.clone()
+        }
+        /// Occupancy of every fine page of the group, in z-order. Bit
+        /// `x + 4 * y + 16 * z` of a word is set when voxel (x, y, z) of the
+        /// page is constructed.
+        pub fn values(&self) -> Vec<u64> {
+            self.values.to_vec()
+        }
+    }
+
     #[pymodule_export]
-    use crate::{Multipliers, PointF, PointI};
+    use crate::{CompressedVoxelGroup, Multipliers, PointF, PointI};
 
     #[cfg(feature = "single_threaded")]
     #[pyo3::pyclass]
@@ -148,6 +175,16 @@ mod r3v_voxelizer {
         /// Copy of the multipliers used by `add_points`.
         fn get_multipliers(&self) -> Multipliers {
             self.0.multipliers()
+        }
+        /// Every voxel that is not 0, with its value.
+        fn get_all_points(&self) -> Vec<PointI> {
+            self.0.get_all_points()
+        }
+        /// Every constructed voxel, as groups holding at least one. Without
+        /// `compress` a voxel counts as constructed once it reaches
+        /// `construct_threshold`.
+        fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_points_compressed()
         }
     }
 
@@ -202,6 +239,16 @@ mod r3v_voxelizer {
         /// Copy of the multipliers used by `add_points`.
         fn get_multipliers(&self) -> Multipliers {
             self.0.multipliers()
+        }
+        /// Every voxel that is not 0, with its value.
+        fn get_all_points(&self) -> Vec<PointI> {
+            self.0.get_all_points()
+        }
+        /// Every constructed voxel, as groups holding at least one. Without
+        /// `compress` a voxel counts as constructed once it reaches
+        /// `construct_threshold`.
+        fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_points_compressed()
         }
     }
 
@@ -259,6 +306,16 @@ mod r3v_voxelizer {
         /// Copy of the multipliers used by `add_points`.
         fn get_multipliers(&self) -> Multipliers {
             self.0.multipliers()
+        }
+        /// Every voxel that is not 0, with its value.
+        fn get_all_points(&self) -> Vec<PointI> {
+            self.0.get_all_points()
+        }
+        /// Every constructed voxel, as groups holding at least one. Without
+        /// `compress` a voxel counts as constructed once it reaches
+        /// `construct_threshold`.
+        fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_points_compressed()
         }
         /// GPU memory taken by the hashmap of `bucket_count` buckets, in bytes.
         #[staticmethod]

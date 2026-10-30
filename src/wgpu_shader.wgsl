@@ -138,7 +138,8 @@ const KEY_SET: u32 = 1u << 31;
 const KEY_REMOVED: u32 = 1;
 // Entry has been modified during the current call (it is listed in `altered`)
 const ENTRY_TOUCHED: u32 = 1;
-// A voxel of the entry has been zeroed during the current call (it is listed in `emptied`)
+// A voxel of the entry has been zeroed or left at 0 by a target during the current call
+// (it is listed in `emptied`)
 const ENTRY_MAYBE_EMPTY: u32 = 2;
 struct Entry {
     // Hashable position (x, y, z) | KEY_SET (see `claim_key_word`), all KEY_UNSET in a free entry
@@ -256,7 +257,8 @@ fn mark_touched(entry: u32) {
     }
 }
 
-// Lists the entry in `emptied` when any of its voxels is zeroed for the first time during the current call
+// Lists the entry in `emptied` when any of its voxels is zeroed (or left at 0 by a target) for the first time
+// during the current call
 fn mark_maybe_empty(entry: u32) {
     if (atomicOr(&entries[entry].flags, ENTRY_MAYBE_EMPTY) & ENTRY_MAYBE_EMPTY) == 0 {
         emptied.entries[atomicAdd(&emptied.len, 1)] = entry;
@@ -284,11 +286,21 @@ fn atomic_capped_add(voxel: u32, val: u32) {
 
 // Value is dropped if there is no space left for it
 fn add_val(pos: vec3i, val: StoredValue) {
+    // Adding 0 changes nothing and must not insert an entry no call would remove
+    if val == 0 {
+        return;
+    }
     let entry = find_or_insert(pos);
     // NO_ENTRY at this point means that there is no space left
-    if entry != NO_ENTRY && val != 0 {
-        atomic_capped_add(voxel_pos(entry, get_z_order(pos)), val);
+    if entry != NO_ENTRY {
+        let voxel = voxel_pos(entry, get_z_order(pos));
+        atomic_capped_add(voxel, val);
         mark_touched(entry);
+        // Capped at 0 the voxel stays 0 and can leave a new entry all 0
+        // Only additions run during this dispatch, so 0 here is final
+        if atomicLoad(&voxels[voxel].value) == 0 {
+            mark_maybe_empty(entry);
+        }
     }
 }
 

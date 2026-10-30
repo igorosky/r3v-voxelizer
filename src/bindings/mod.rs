@@ -1,4 +1,4 @@
-#[cfg(feature = "c")]
+#[cfg(any(feature = "c", feature = "cpp"))]
 mod c;
 #[cfg(feature = "js")]
 mod js;
