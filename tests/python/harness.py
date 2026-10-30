@@ -7,6 +7,7 @@ tests/python_bindings.rs), so a failed check raises and ends the process.
 usage: voxelizer_tests.py list | run <impl>::<test> | run <test>
 """
 
+import collections
 import contextlib
 import os
 import sys
@@ -88,17 +89,18 @@ def coords(point):
 
 
 def voxels(update, context=""):
-    """Checks the types of what add_points returned and gives its points as
-    sorted (x, y, z, i) tuples."""
+    """Checks the types of what add_points (or get_all_points) returned and
+    gives its points as sorted (x, y, z, i) tuples."""
     prefix = f"{context}: " if context else ""
-    check(type(update) is list, f"{prefix}add_points returned {type(update).__name__}, not list")
+    check(type(update) is list, f"{prefix}returned a {type(update).__name__}, not a list")
     for point in update:
         check(type(point) is rv.PointI, f"{prefix}update holds {type(point).__name__}, not PointI")
     return sorted(coords(point) for point in update)
 
 
 def check_update(update, expected, context=""):
-    """Compares what add_points returned with (x, y, z, i) tuples, ignoring order."""
+    """Compares what add_points (or get_all_points) returned with
+    (x, y, z, i) tuples, ignoring order."""
     got = voxels(update, context)
     expected = sorted(expected)
     if got != expected:
@@ -208,6 +210,72 @@ def block(x, y, z, mask):
     return pi(x & ~3, y & ~3, z & ~1, mask)
 
 
+def expand_blocks(blocks):
+    """Every voxel set in the 32 bit packs of blocks, as sorted
+    (x, y, z, 1) tuples."""
+    return sorted(pi(x + (bit & 3), y + ((bit >> 2) & 3), z + (bit >> 4), 1)
+                  for x, y, z, mask in blocks for bit in range(32) if mask >> bit & 1)
+
+
+# ---------------------------------------------------------- dump helpers
+#
+# get_all_points_compressed returns one CompressedVoxelGroup per 64x64x64
+# voxel cube holding a constructed voxel: a word per 4x4x4 fine page in
+# z-order, bit x + 4 * y + 16 * z of it set when voxel (x, y, z) of the page
+# is constructed.
+
+# ALL_POINTS_GROUP_EDGE_BITS of the crate.
+GROUP_EDGE_BITS = 4
+POINTS_IN_VOXEL_GROUP = 1 << (3 * GROUP_EDGE_BITS)
+
+
+def decode_groups(groups):
+    """Checks the types of what get_all_points_compressed returned and gives
+    every voxel set in it as sorted (x, y, z, 1) tuples (port of
+    `decode_groups` in src/test.rs)."""
+    check(type(groups) is list,
+          f"get_all_points_compressed returned a {type(groups).__name__}, not a list")
+    points = []
+    for group in groups:
+        check(type(group) is rv.CompressedVoxelGroup,
+              f"get_all_points_compressed holds {type(group).__name__}, not CompressedVoxelGroup")
+        x, y, z, i = coords(group.point())
+        check(i == 0, f"group key {(x, y, z, i)} has i != 0")
+        values = group.values()
+        check(len(values) == POINTS_IN_VOXEL_GROUP, f"group holds {len(values)} words")
+        for k, word in enumerate(values):
+            if not word:
+                continue
+            # Bits of x, y and z of the page offset interleave from the
+            # lowest one.
+            offset = [0, 0, 0]
+            for b in range(3 * GROUP_EDGE_BITS):
+                offset[b % 3] |= (k >> b & 1) << (b // 3)
+            px, py, pz = (x << GROUP_EDGE_BITS | offset[0], y << GROUP_EDGE_BITS | offset[1],
+                          z << GROUP_EDGE_BITS | offset[2])
+            points += [pi(px << 2 | bit & 3, py << 2 | bit >> 2 & 3, pz << 2 | bit >> 4, 1)
+                       for bit in range(64) if word >> bit & 1]
+    return sorted(points)
+
+
+def check_constructed(voxelizer, *expected):
+    """Compares the decoded compressed dump of voxelizer with (x, y, z, 1)
+    tuples, ignoring order."""
+    got = decode_groups(voxelizer.get_all_points_compressed())
+    if got != sorted(expected):
+        fail(f"constructed voxels differ\n     got: {got}\nexpected: {sorted(expected)}")
+
+
+# Both dumps of a voxelizer: get_all_points as sorted (x, y, z, i) tuples and
+# the voxels set in get_all_points_compressed (see decode_groups).
+Dump = collections.namedtuple("Dump", ["points", "constructed"])
+
+
+def dump(voxelizer):
+    return Dump(voxels(voxelizer.get_all_points(), "get_all_points"),
+                decode_groups(voxelizer.get_all_points_compressed()))
+
+
 # -------------------------------------------------------------- scenario
 #
 # A deterministic, schedule independent workload used to compare
@@ -241,15 +309,29 @@ def cube_faces(dist, half, step):
     return coords
 
 
-def scenario(voxelizer):
-    """Runs the scenario and returns the sorted output of every call."""
+# results: the sorted output of every call. dump: the dumps after the last
+# call, None unless asked for.
+Snapshot = collections.namedtuple("Snapshot", ["results", "dump"])
+
+
+def scenario(voxelizer, with_dump=True):
+    """Runs the scenario and returns a Snapshot of it."""
     rng = Lcg(0x5EED)
-    snapshot = []
+    results = []
     for dist, half, step, max_i in [(50, 20, 4, 5), (100, 40, 8, 3)]:
         points = [pf(x + 0.5, y + 0.5, z + 0.5, 1 + rng.next() % max_i)
                   for x, y, z in cube_faces(dist, half, step)]
-        snapshot.append(voxels(voxelizer.add_points(sensor(), points)))
-    return snapshot
+        results.append(voxels(voxelizer.add_points(sensor(), points)))
+    return Snapshot(results, dump(voxelizer) if with_dump else None)
+
+
+def replay(results):
+    """Last value every voxel (or block in compress mode) got in results,
+    without the zeroed ones, as sorted (x, y, z, i) tuples."""
+    last = {}
+    for result in results:
+        last.update(((x, y, z), i) for x, y, z, i in result)
+    return sorted(pi(*xyz, i) for xyz, i in last.items() if i != 0)
 
 
 # ------------------------------------------------------------------ main

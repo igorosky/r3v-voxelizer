@@ -71,6 +71,14 @@ void fail(const char *file, int line, const char *fmt, ...);
         }                                                        \
     } while (0)
 
+/* Same order as the derived Ord of PointI: x, y, z, i. qsort comparator. */
+int cmp_point_i(const void *lhs, const void *rhs);
+void sort_points(PointI *points, size_t len);
+
+/* Sorts both lists (got in place) and compares them. */
+void check_points(PointI *got, size_t got_len, const PointI *expected, size_t expected_len,
+                  const char *file, int line);
+
 /* Sorts both lists, compares them and frees the update. */
 void check_update(VoxelsUpdate update, const PointI *expected, size_t expected_len,
                   const char *file, int line);
@@ -144,6 +152,46 @@ void check_ray_at(const Impl *impl, PointF sensor, PointF point, const Coord *hi
 uint32_t block_bit(int32_t x, int32_t y, int32_t z);
 /* Expected compress mode output for the block containing (x, y, z). */
 PointI block(int32_t x, int32_t y, int32_t z, uint32_t mask);
+/* Every voxel set in the 32 bit packs of blocks, with i = 1, sorted. The
+ * returned list is malloc'ed. */
+PointI *expand_blocks(const PointI *blocks, size_t len, size_t *out_len);
+
+/* ---------------------------------------------------------- dump helpers
+ *
+ * get_all_points_compressed returns one VoxelGroup per 64x64x64 voxel cube
+ * holding a constructed voxel: a word per 4x4x4 fine page in z-order, bit
+ * x + 4 * y + 16 * z of it set when voxel (x, y, z) of the page is
+ * constructed. */
+
+/* Every voxel set in groups, with i = 1, sorted (port of `decode_groups` in
+ * src/test.rs). The returned list is malloc'ed. */
+PointI *decode_groups(VoxelGroups groups, size_t *out_len);
+
+/* Both dumps of a voxelizer, sorted. */
+typedef struct Dump
+{
+    /* get_all_points. */
+    PointI *points;
+    size_t points_len;
+    /* Decoded get_all_points_compressed. */
+    PointI *constructed;
+    size_t constructed_len;
+} Dump;
+
+Dump dump(const void *voxelizer);
+void dump_free(Dump *dump);
+void check_dump_eq(const Dump *got, const Dump *expected, const char *ctx, const char *file,
+                   int line);
+
+/* Decodes the compressed dump of voxelizer and compares it with expected
+ * voxels (i = 1), ignoring order. */
+void check_constructed(const void *voxelizer, const PointI *expected, size_t expected_len,
+                       const char *file, int line);
+#define EXPECT_CONSTRUCTED(voxelizer, ...)                                               \
+    check_constructed((voxelizer), VOXELS(__VA_ARGS__), ARRAY_LEN(VOXELS(__VA_ARGS__)), \
+                      __FILE__, __LINE__)
+#define EXPECT_NONE_CONSTRUCTED(voxelizer) \
+    check_constructed((voxelizer), NULL, 0, __FILE__, __LINE__)
 
 /* ------------------------------------------------------------ scenario
  *
@@ -166,11 +214,20 @@ typedef struct Snapshot
     /* Sorted output of every call. */
     PointI *results[SCENARIO_CALLS];
     size_t lens[SCENARIO_CALLS];
+    /* Dumps after the last call, empty unless asked for. */
+    Dump dump;
 } Snapshot;
 
-/* Runs the scenario on a fresh voxelizer and drops it. */
+/* Runs the scenario on voxelizer, dumping it after the last call when
+ * with_dump. */
+Snapshot run_scenario(void *voxelizer, bool with_dump);
+/* Runs the scenario with dumps on a fresh voxelizer and drops it. */
 Snapshot scenario(void *voxelizer);
 void snapshot_free(Snapshot *snapshot);
+/* Last value every voxel (or block in compress mode) got in the results of
+ * snapshot, without the zeroed ones, sorted. The returned list is
+ * malloc'ed. */
+PointI *replay(const Snapshot *snapshot, size_t *out_len);
 void check_snapshot_eq(const Snapshot *got, const Snapshot *expected, const char *ctx,
                        const char *file, int line);
 

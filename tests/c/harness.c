@@ -28,8 +28,7 @@ void fail(const char *file, int line, const char *fmt, ...)
     exit(1);
 }
 
-/* Same order as the derived Ord of PointI: x, y, z, i. */
-static int cmp_point_i(const void *lhs, const void *rhs)
+int cmp_point_i(const void *lhs, const void *rhs)
 {
     const PointI *a = lhs;
     const PointI *b = rhs;
@@ -44,7 +43,7 @@ static int cmp_point_i(const void *lhs, const void *rhs)
     return 0;
 }
 
-static void sort_points(PointI *points, size_t len)
+void sort_points(PointI *points, size_t len)
 {
     if (len > 1)
     {
@@ -75,7 +74,7 @@ static bool points_eq(const PointI *a, size_t a_len, const PointI *b, size_t b_l
     return true;
 }
 
-void check_update(VoxelsUpdate update, const PointI *expected, size_t expected_len,
+void check_points(PointI *got, size_t got_len, const PointI *expected, size_t expected_len,
                   const char *file, int line)
 {
     PointI *want = NULL;
@@ -86,16 +85,45 @@ void check_update(VoxelsUpdate update, const PointI *expected, size_t expected_l
         memcpy(want, expected, expected_len * sizeof(PointI));
         sort_points(want, expected_len);
     }
-    sort_points(update.data, update.len);
-    if (!points_eq(update.data, update.len, want, expected_len))
+    sort_points(got, got_len);
+    if (!points_eq(got, got_len, want, expected_len))
     {
-        fprintf(stderr, "%s:%d: unexpected update\n", file, line);
-        print_points("got", update.data, update.len);
+        fprintf(stderr, "%s:%d: unexpected voxels\n", file, line);
+        print_points("got", got, got_len);
         print_points("expected", want, expected_len);
         exit(1);
     }
     free(want);
+}
+
+void check_update(VoxelsUpdate update, const PointI *expected, size_t expected_len,
+                  const char *file, int line)
+{
+    check_points(update.data, update.len, expected, expected_len, file, line);
     drop_update(update);
+}
+
+/* Compares two sorted lists, what names them in the failure message. */
+static void check_list_eq(const PointI *got, size_t got_len, const PointI *expected,
+                          size_t expected_len, const char *what, const char *ctx,
+                          const char *file, int line)
+{
+    if (got_len != expected_len)
+    {
+        fail(file, line, "%s: %s has %zu voxels, expected %zu", ctx, what, got_len,
+             expected_len);
+    }
+    for (size_t k = 0; k < got_len; ++k)
+    {
+        const PointI *g = &got[k];
+        const PointI *e = &expected[k];
+        if (cmp_point_i(g, e) != 0)
+        {
+            fail(file, line,
+                 "%s: %s differs at %zu: got (%d, %d, %d, %u), expected (%d, %d, %d, %u)", ctx,
+                 what, k, g->x, g->y, g->z, g->i, e->x, e->y, e->z, e->i);
+        }
+    }
 }
 
 /* ------------------------------------------------------------- helpers */
@@ -224,6 +252,131 @@ PointI block(int32_t x, int32_t y, int32_t z, uint32_t mask)
     return pi(x & ~3, y & ~3, z & ~1, mask);
 }
 
+/* Appends p to the malloc'ed list points, growing it as needed. */
+static void push_point(PointI **points, size_t *len, size_t *cap, PointI p)
+{
+    if (*len == *cap)
+    {
+        *cap = *cap == 0 ? 64 : *cap * 2;
+        *points = realloc(*points, *cap * sizeof(PointI));
+        CHECK(*points != NULL);
+    }
+    (*points)[(*len)++] = p;
+}
+
+PointI *expand_blocks(const PointI *blocks, size_t len, size_t *out_len)
+{
+    PointI *points = NULL;
+    size_t count = 0, cap = 0;
+    for (size_t k = 0; k < len; ++k)
+    {
+        for (int32_t bit = 0; bit < 32; ++bit)
+        {
+            if (blocks[k].i & (1u << bit))
+            {
+                push_point(&points, &count, &cap,
+                           pi(blocks[k].x + (bit & 3), blocks[k].y + ((bit >> 2) & 3),
+                              blocks[k].z + (bit >> 4), 1));
+            }
+        }
+    }
+    sort_points(points, count);
+    *out_len = count;
+    return points;
+}
+
+/* -------------------------------------------------------- dump helpers */
+
+PointI *decode_groups(VoxelGroups groups, size_t *out_len)
+{
+    PointI *points = NULL;
+    size_t count = 0, cap = 0;
+    for (size_t g = 0; g < groups.len; ++g)
+    {
+        const VoxelGroup *group = &groups.data[g];
+        for (size_t k = 0; k < POINTS_IN_VOXEL_GROUP; ++k)
+        {
+            uint64_t word = group->values[k];
+            if (word == 0)
+            {
+                continue;
+            }
+            /* Bits of x, y and z of the page offset interleave from the
+             * lowest one. */
+            int32_t offset[3] = {0, 0, 0};
+            for (size_t b = 0; b < 3 * ALL_POINTS_GROUP_EDGE_BITS; ++b)
+            {
+                offset[b % 3] |= (int32_t)((k >> b) & 1) << (b / 3);
+            }
+            /* Multiplied, a negative value must not be shifted left. */
+            int32_t page_x = group->point.x * (1 << ALL_POINTS_GROUP_EDGE_BITS) + offset[0];
+            int32_t page_y = group->point.y * (1 << ALL_POINTS_GROUP_EDGE_BITS) + offset[1];
+            int32_t page_z = group->point.z * (1 << ALL_POINTS_GROUP_EDGE_BITS) + offset[2];
+            for (int32_t bit = 0; bit < 64; ++bit)
+            {
+                if (word & (1ull << bit))
+                {
+                    push_point(&points, &count, &cap,
+                               pi(page_x * 4 + (bit & 3), page_y * 4 + ((bit >> 2) & 3),
+                                  page_z * 4 + (bit >> 4), 1));
+                }
+            }
+        }
+    }
+    sort_points(points, count);
+    *out_len = count;
+    return points;
+}
+
+Dump dump(const void *voxelizer)
+{
+    Dump out = {NULL, 0, NULL, 0};
+    VoxelsUpdate points = get_all_points(voxelizer);
+    out.points_len = points.len;
+    out.points = malloc((points.len + 1) * sizeof(PointI));
+    CHECK(out.points != NULL);
+    if (points.len > 0)
+    {
+        memcpy(out.points, points.data, points.len * sizeof(PointI));
+    }
+    sort_points(out.points, out.points_len);
+    drop_update(points);
+    VoxelGroups groups = get_all_points_compressed(voxelizer);
+    out.constructed = decode_groups(groups, &out.constructed_len);
+    drop_voxel_groups(groups);
+    return out;
+}
+
+void dump_free(Dump *dump)
+{
+    free(dump->points);
+    free(dump->constructed);
+    dump->points = NULL;
+    dump->points_len = 0;
+    dump->constructed = NULL;
+    dump->constructed_len = 0;
+}
+
+void check_dump_eq(const Dump *got, const Dump *expected, const char *ctx, const char *file,
+                   int line)
+{
+    check_list_eq(got->points, got->points_len, expected->points, expected->points_len,
+                  "get_all_points", ctx, file, line);
+    check_list_eq(got->constructed, got->constructed_len, expected->constructed,
+                  expected->constructed_len, "get_all_points_compressed", ctx, file, line);
+}
+
+void check_constructed(const void *voxelizer, const PointI *expected, size_t expected_len,
+                       const char *file, int line)
+{
+    VoxelGroups groups = get_all_points_compressed(voxelizer);
+    size_t len;
+    PointI *got = decode_groups(groups, &len);
+    drop_voxel_groups(groups);
+    check_points(got, len, expected, expected_len, file, line);
+    free(got);
+}
+
 /* ------------------------------------------------------------ scenario */
 
 /* With compression destroy = construct - 1, so a voxel above the destroy
@@ -261,7 +414,7 @@ static size_t cube_faces(int32_t dist, int32_t half, int32_t step, Coord **out)
     return len;
 }
 
-Snapshot scenario(void *voxelizer)
+Snapshot run_scenario(void *voxelizer, bool with_dump)
 {
     static const struct
     {
@@ -270,7 +423,7 @@ Snapshot scenario(void *voxelizer)
     } calls[SCENARIO_CALLS] = {{50, 20, 4, 5}, {100, 40, 8, 3}};
     PointF sensor = pf(0.5f, 0.5f, 0.5f, 1.0f);
     uint64_t rng = 0x5EED;
-    Snapshot snapshot = {{NULL}, {0}};
+    Snapshot snapshot = {{NULL}, {0}, {NULL, 0, NULL, 0}};
     for (size_t call = 0; call < SCENARIO_CALLS; ++call)
     {
         Coord *coords;
@@ -296,6 +449,16 @@ Snapshot scenario(void *voxelizer)
         free(points);
         free(coords);
     }
+    if (with_dump)
+    {
+        snapshot.dump = dump(voxelizer);
+    }
+    return snapshot;
+}
+
+Snapshot scenario(void *voxelizer)
+{
+    Snapshot snapshot = run_scenario(voxelizer, true);
     drop_voxelizer(voxelizer);
     return snapshot;
 }
@@ -308,6 +471,7 @@ void snapshot_free(Snapshot *snapshot)
         snapshot->results[call] = NULL;
         snapshot->lens[call] = 0;
     }
+    dump_free(&snapshot->dump);
 }
 
 void check_snapshot_eq(const Snapshot *got, const Snapshot *expected, const char *ctx,
@@ -315,24 +479,51 @@ void check_snapshot_eq(const Snapshot *got, const Snapshot *expected, const char
 {
     for (size_t call = 0; call < SCENARIO_CALLS; ++call)
     {
-        if (got->lens[call] != expected->lens[call])
+        char what[32];
+        snprintf(what, sizeof what, "result of call %zu", call);
+        check_list_eq(got->results[call], got->lens[call], expected->results[call],
+                      expected->lens[call], what, ctx, file, line);
+    }
+    check_dump_eq(&got->dump, &expected->dump, ctx, file, line);
+}
+
+/* Whether points holds one at the coordinates of p, whatever its i. */
+static bool has_coords(const PointI *points, size_t len, PointI p)
+{
+    for (size_t k = 0; k < len; ++k)
+    {
+        if (points[k].x == p.x && points[k].y == p.y && points[k].z == p.z)
         {
-            fail(file, line, "%s: result of call %zu has %zu voxels, expected %zu", ctx, call,
-                 got->lens[call], expected->lens[call]);
+            return true;
         }
-        for (size_t k = 0; k < got->lens[call]; ++k)
+    }
+    return false;
+}
+
+PointI *replay(const Snapshot *snapshot, size_t *out_len)
+{
+    PointI *points = NULL;
+    size_t count = 0, cap = 0;
+    for (size_t call = 0; call < SCENARIO_CALLS; ++call)
+    {
+        for (size_t k = 0; k < snapshot->lens[call]; ++k)
         {
-            const PointI *g = &got->results[call][k];
-            const PointI *e = &expected->results[call][k];
-            if (cmp_point_i(g, e) != 0)
+            PointI p = snapshot->results[call][k];
+            /* A later call reporting the voxel overrides this value. */
+            bool overridden = false;
+            for (size_t next = call + 1; next < SCENARIO_CALLS && !overridden; ++next)
             {
-                fail(file, line,
-                     "%s: result of call %zu differs at %zu: got (%d, %d, %d, %u), "
-                     "expected (%d, %d, %d, %u)",
-                     ctx, call, k, g->x, g->y, g->z, g->i, e->x, e->y, e->z, e->i);
+                overridden = has_coords(snapshot->results[next], snapshot->lens[next], p);
+            }
+            if (!overridden && p.i != 0)
+            {
+                push_point(&points, &count, &cap, p);
             }
         }
     }
+    sort_points(points, count);
+    *out_len = count;
+    return points;
 }
 
 /* ---------------------------------------------------------------- main */

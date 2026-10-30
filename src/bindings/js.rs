@@ -81,7 +81,7 @@ fn points_from_js(value: &wasm_bindgen::JsValue) -> Result<Vec<PointF>, wasm_bin
 mod st {
     use super::points_from_js;
     use crate::Voxelizer;
-    use crate::{Multipliers, PointF, PointI};
+    use crate::{CompressedVoxelGroup, Multipliers, PointF, PointI};
     use wasm_bindgen::prelude::wasm_bindgen;
     use wasm_bindgen::{JsError, JsValue};
 
@@ -133,6 +133,16 @@ mod st {
         pub fn get_multipliers(&self) -> Multipliers {
             self.0.multipliers()
         }
+        /// Every voxel that is not 0, with its value.
+        pub fn get_all_points(&self) -> Vec<PointI> {
+            self.0.get_all_points()
+        }
+        /// Every constructed voxel, as groups holding at least one. Without
+        /// `compress` a voxel counts as constructed once it reaches
+        /// `construct_threshold`.
+        pub fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_points_compressed()
+        }
     }
 }
 
@@ -142,12 +152,13 @@ mod gpu {
 
     use super::points_from_js;
     use crate::Voxelizer;
-    use crate::{Multipliers, PointF, PointI};
+    use crate::{CompressedVoxelGroup, Multipliers, PointF, PointI};
     use wasm_bindgen::prelude::wasm_bindgen;
     use wasm_bindgen::{JsError, JsValue};
 
-    /// Runs on WebGPU. Created with the async `create`, `add_points` returns
-    /// a Promise and a call has to finish before the next one starts.
+    /// Runs on WebGPU. Created with the async `create`, `add_points` and the
+    /// dumps return a Promise and a call has to finish before the next one
+    /// starts.
     ///
     /// The voxelizer is taken out while a call runs, so an overlapping call
     /// finds none and rejects. Borrowing `&mut self` across the await instead
@@ -155,6 +166,17 @@ mod gpu {
     /// an uncaught error rather than a rejection.
     #[wasm_bindgen]
     pub struct WgpuAccelerated(Cell<Option<crate::WgpuAccelerated>>);
+
+    impl WgpuAccelerated {
+        /// Takes the voxelizer out, it has to be put back once `what` is done.
+        fn take(&self, what: &str) -> Result<crate::WgpuAccelerated, JsError> {
+            self.0.take().ok_or_else(|| {
+                JsError::new(&format!(
+                    "another call is still running, it has to finish before {what}"
+                ))
+            })
+        }
+    }
 
     #[wasm_bindgen]
     impl WgpuAccelerated {
@@ -203,11 +225,7 @@ mod gpu {
             #[wasm_bindgen(unchecked_param_type = "PointFLike[]")] points: JsValue,
         ) -> Result<Vec<PointI>, JsError> {
             let points = points_from_js(&points)?;
-            let mut voxelizer = self.0.take().ok_or_else(|| {
-                JsError::new(
-                    "add_points is still running, a call has to finish before the next one",
-                )
-            })?;
+            let mut voxelizer = self.take("add_points")?;
             let update = voxelizer
                 .add_points_async(sensor_pos.clone(), points.as_slice())
                 .await;
@@ -215,24 +233,39 @@ mod gpu {
             Ok(update)
         }
         /// Multipliers used by the following `add_points` calls, voxels keep
-        /// the values they got so far. Throws while `add_points` is running.
+        /// the values they got so far. Throws while another call is running.
         pub fn set_multipliers(&self, multipliers: &Multipliers) -> Result<(), JsError> {
-            let mut voxelizer = self.0.take().ok_or_else(|| {
-                JsError::new("add_points is still running, it has to finish before set_multipliers")
-            })?;
+            let mut voxelizer = self.take("set_multipliers")?;
             voxelizer.set_multipliers(*multipliers);
             self.0.set(Some(voxelizer));
             Ok(())
         }
-        /// Copy of the multipliers used by `add_points`. Throws while
-        /// `add_points` is running.
+        /// Copy of the multipliers used by `add_points`. Throws while another
+        /// call is running.
         pub fn get_multipliers(&self) -> Result<Multipliers, JsError> {
-            let voxelizer = self.0.take().ok_or_else(|| {
-                JsError::new("add_points is still running, it has to finish before get_multipliers")
-            })?;
+            let voxelizer = self.take("get_multipliers")?;
             let multipliers = voxelizer.multipliers();
             self.0.set(Some(voxelizer));
             Ok(multipliers)
+        }
+        /// Every voxel that is not 0, with its value. Rejects while another
+        /// call is running.
+        pub async fn get_all_points(&self) -> Result<Vec<PointI>, JsError> {
+            let voxelizer = self.take("get_all_points")?;
+            let points = voxelizer.get_all_points_async().await;
+            self.0.set(Some(voxelizer));
+            Ok(points)
+        }
+        /// Every constructed voxel, as groups holding at least one. Without
+        /// `compress` a voxel counts as constructed once it reaches
+        /// `construct_threshold`. Rejects while another call is running.
+        pub async fn get_all_points_compressed(
+            &self,
+        ) -> Result<Vec<CompressedVoxelGroup>, JsError> {
+            let voxelizer = self.take("get_all_points_compressed")?;
+            let groups = voxelizer.get_all_points_compressed_async().await;
+            self.0.set(Some(voxelizer));
+            Ok(groups)
         }
         /// GPU memory taken by the hashmap of `bucket_count` buckets, in
         /// bytes. Exact as a number, it stays below 2 ** 53.

@@ -88,9 +88,10 @@ group_c() {
     for features in "${sets[@]}"; do
         clippy "$features"
     done
-    # The suite needs both CPU implementations, with and without the GPU one
-    cargo_test "c,single_threaded,multi_threaded" --test c_bindings
-    cargo_test "c,single_threaded,multi_threaded,wgpu" --test c_bindings
+    # The suites (C and C++) need both CPU implementations, with and without
+    # the GPU one
+    cargo_test "c,cpp,single_threaded,multi_threaded" --test c_bindings
+    cargo_test "c,cpp,single_threaded,multi_threaded,wgpu" --test c_bindings
 }
 
 group_python() {

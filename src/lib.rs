@@ -20,7 +20,8 @@ pub use wgpu::WgpuAccelerated;
 
 /// Count of bits that encode one coordinate in all points group
 pub const ALL_POINTS_GROUP_EDGE_BITS: u32 = 4;
-pub const POINTS_IN_VOXEL_GROUP: usize = 2_usize.pow(3 * ALL_POINTS_GROUP_EDGE_BITS);
+/// Count of words in a compressed voxel group, one per fine page
+pub const POINTS_IN_VOXEL_GROUP: usize = 1 << (3 * ALL_POINTS_GROUP_EDGE_BITS);
 
 pub trait Voxelizer {
     fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI>;

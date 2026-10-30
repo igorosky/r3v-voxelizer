@@ -15,9 +15,10 @@ from pathlib import Path
 import r3v_voxelizer as rv
 
 from harness import (
-    CLASS_OF_FEATURE, FEATURES, SCENARIO_PARAMS, SEED, SINGLE, WGPU, WGPU_TEST_BUCKETS, add_point, along_x, block,
-    block_bit, check, check_ray, check_update, compressed, coords, expect_no_voxels, expect_voxels, fail, from_above,
-    main, make, multi_threaded, pf, pi, plain, raises, scenario, seed, sensor,
+    CLASS_OF_FEATURE, FEATURES, POINTS_IN_VOXEL_GROUP, SCENARIO_PARAMS, SEED, SINGLE, WGPU, WGPU_TEST_BUCKETS,
+    add_point, along_x, block, block_bit, check, check_constructed, check_ray, check_update, compressed, coords,
+    decode_groups, dump, expand_blocks, expect_no_voxels, expect_voxels, fail, from_above, main, make,
+    multi_threaded, pf, pi, plain, raises, replay, scenario, seed, sensor,
 )
 
 U32_MAX = 2**32 - 1
@@ -25,7 +26,7 @@ U32_MAX = 2**32 - 1
 # ------------------------------------------------------------ Python API
 
 # Classes the module has whatever features it is built with.
-VALUE_CLASSES = ["Multipliers", "PointF", "PointI"]
+VALUE_CLASSES = ["CompressedVoxelGroup", "Multipliers", "PointF", "PointI"]
 
 
 def enabled_classes():
@@ -281,6 +282,35 @@ def multipliers_setters():
         multipliers.set_hit(-1)
     with raises(OverflowError):
         multipliers.set_target(U32_MAX + 1)
+
+
+def compressed_voxel_group_constructor():
+    values = [0] * POINTS_IN_VOXEL_GROUP
+    values[7] = 1 << 57
+    values[-1] = 2**64 - 1
+    group = rv.CompressedVoxelGroup(rv.PointI(-1, 2, -3, 0), values)
+    check(coords(group.point()) == (-1, 2, -3, 0))
+    check(group.values() == values)
+    check(all(type(word) is int for word in group.values()))
+    check(coords(rv.CompressedVoxelGroup(values=values, point=rv.PointI(1, 2, 3, 4)).point())
+          == (1, 2, 3, 4))
+    # Changing the list passed in or the one returned leaves the group as it
+    # was.
+    values[0] = 1
+    group.values()[1] = 1
+    got = group.values()
+    check(got[0] == 0 and got[1] == 0, "a list changed the group")
+    for length in (0, POINTS_IN_VOXEL_GROUP - 1, POINTS_IN_VOXEL_GROUP + 1):
+        with raises(ValueError):
+            rv.CompressedVoxelGroup(rv.PointI(0, 0, 0, 0), [0] * length)
+    with raises(OverflowError):
+        rv.CompressedVoxelGroup(rv.PointI(0, 0, 0, 0), [-1] * POINTS_IN_VOXEL_GROUP)
+    with raises(OverflowError):
+        rv.CompressedVoxelGroup(rv.PointI(0, 0, 0, 0), [2**64] * POINTS_IN_VOXEL_GROUP)
+    with raises(TypeError):
+        rv.CompressedVoxelGroup((0, 0, 0, 0), values)
+    with raises(TypeError):
+        rv.CompressedVoxelGroup(rv.PointI(0, 0, 0, 0), None)
 
 
 def constructors_reject_out_of_range(impl):
@@ -924,13 +954,182 @@ def set_multipliers_same_as_constructed(impl):
                           "runs differ")
 
 
+# --------------------------------------------------------------- dumps
+
+
+def get_all_points_result_types(impl):
+    v = plain(impl)
+    from_above(v, 5, 6, 7, 3.0)
+    points = v.get_all_points()
+    check(type(points) is list, f"get_all_points returned {type(points).__name__}, not list")
+    check(len(points) == 1 and type(points[0]) is rv.PointI, f"get_all_points returned {points}")
+    check(all(type(value) is int for value in coords(points[0])))
+    groups = v.get_all_points_compressed()
+    check(type(groups) is list,
+          f"get_all_points_compressed returned {type(groups).__name__}, not list")
+    check(len(groups) == 1 and type(groups[0]) is rv.CompressedVoxelGroup,
+          f"get_all_points_compressed returned {groups}")
+    check(type(groups[0].point()) is rv.PointI)
+    values = groups[0].values()
+    check(type(values) is list and len(values) == POINTS_IN_VOXEL_GROUP)
+    check(all(type(word) is int for word in values))
+    # The results are owned by Python and outlive the voxelizer.
+    del v
+    gc.collect()
+    check(coords(points[0]) == (5, 6, 7, 3))
+    check(coords(groups[0].point()) == (0, 0, 0, 0))
+    check(decode_groups(groups) == [pi(5, 6, 7, 1)])
+
+
+def get_all_points_empty(impl):
+    expect_no_voxels(plain(impl).get_all_points())
+    expect_no_voxels(compressed(impl).get_all_points())
+
+
+def get_all_points_single_target(impl):
+    v = plain(impl)
+    from_above(v, 5, 6, 7, 3.0)
+    expect_voxels(v.get_all_points(), pi(5, 6, 7, 3))
+
+
+def get_all_points_zero_intensity_target(impl):
+    v = plain(impl)
+    expect_no_voxels(from_above(v, 5, 6, 7, 0.0))
+    expect_no_voxels(v.get_all_points())
+
+
+def get_all_points_emptied_page_gone(impl):
+    v = plain(impl)
+    from_above(v, 0, 0, 0, 2.0)
+    # Drops (0, 0, 0) to 0, which empties its page.
+    along_x(v, 0, 5, 0, 0, 2.0)
+    expect_voxels(v.get_all_points(), pi(5, 0, 0, 2))
+
+
+def get_all_points_negative_and_large_coords(impl):
+    voxels = [pi(-1, -1, -1, 1), pi(-4, 3, -5, 2), pi(3, 4, -4, 3), pi(63, -64, 64, 4),
+              pi(-70000, 70000, 0, 5), pi(1000000, -1000000, -1, 6)]
+    v = plain(impl)
+    for x, y, z, i in voxels:
+        seed(v, 1.0, x, y, z, float(i))
+    check_update(v.get_all_points(), voxels)
+
+
+def get_all_points_with_compress_returns_values(impl):
+    v = make(impl, 1.0, 1, 1, 2, 3, True)
+    # 2 stays between the thresholds, so only (-5, 6, 7) is constructed.
+    seed(v, 1.0, 5, 6, 7, 2.0)
+    seed(v, 1.0, -5, 6, 7, 4.0)
+    expect_voxels(v.get_all_points(), pi(5, 6, 7, 2), pi(-5, 6, 7, 4))
+    check_constructed(v, pi(-5, 6, 7, 1))
+
+
+def get_all_points_does_not_change_state(impl):
+    for destroy, construct, compress in SCENARIO_PARAMS:
+        v = make(impl, 1.0, 1, 1, destroy, construct, compress)
+        untouched = make(impl, 1.0, 1, 1, destroy, construct, compress)
+        first = scenario(v)
+        scenario(untouched, with_dump=False)
+        check(first.dump.points and first.dump.constructed, f"compress = {compress}: empty dumps")
+        check(dump(v) == first.dump, f"compress = {compress}: dumps differ")
+        # The following calls change the same as without the dumps.
+        check(scenario(v, with_dump=False) == scenario(untouched, with_dump=False),
+              f"compress = {compress}: dumping changed later calls")
+
+
+def get_all_points_compressed_empty(impl):
+    check(plain(impl).get_all_points_compressed() == [])
+    check(compressed(impl).get_all_points_compressed() == [])
+
+
+def get_all_points_compressed_single_voxel(impl):
+    v = compressed(impl)
+    from_above(v, 5, 6, 7, 1.0)
+    groups = v.get_all_points_compressed()
+    check(len(groups) == 1, f"{len(groups)} groups")
+    check(coords(groups[0].point()) == (0, 0, 0, 0))
+    # Page (1, 1, 1) is word 0b111 of the group, voxel (1, 2, 3) of it is
+    # bit 1 + 4 * 2 + 16 * 3.
+    words = [(k, word) for k, word in enumerate(groups[0].values()) if word]
+    check(words == [(0b111, 1 << 57)], f"words {words}")
+
+
+def get_all_points_compressed_group_keys(impl):
+    # A group spans 16 fine pages, 64 voxels, along every axis.
+    for voxel, key in [((-1, -1, -1), (-1, -1, -1)), ((64, 0, 0), (1, 0, 0)),
+                       ((63, 63, 63), (0, 0, 0)), ((-65, 0, 0), (-2, 0, 0)),
+                       ((0, -64, 128), (0, -1, 2))]:
+        v = compressed(impl)
+        from_above(v, *voxel, 1.0)
+        groups = v.get_all_points_compressed()
+        keys = [coords(group.point()) for group in groups]
+        check(keys == [(*key, 0)], f"voxel {voxel}: keys {keys}, expected {[(*key, 0)]}")
+        check(decode_groups(groups) == [pi(*voxel, 1)], f"voxel {voxel}")
+
+
+def get_all_points_compressed_destroyed_group_removed(impl):
+    v = compressed(impl)
+    from_above(v, 5, 6, 7, 1.0)
+    # Destroys (5, 6, 7) and constructs (70, 6, 7) in the next group.
+    along_x(v, 5, 70, 6, 7, 1.0)
+    groups = v.get_all_points_compressed()
+    check([coords(group.point()) for group in groups] == [(1, 0, 0, 0)])
+    check(decode_groups(groups) == [pi(70, 6, 7, 1)])
+
+
+def get_all_points_compressed_plain_threshold(impl):
+    # Without compress a voxel counts as constructed once it reaches
+    # construct_threshold.
+    voxels = [(1, 2, 3, 2.0), (5, 6, 7, 3.0), (70, 0, 0, 4.0)]
+    v = make(impl, 1.0, 1, 1, 0, 3, False)
+    for voxel in voxels:
+        seed(v, 1.0, *voxel)
+    check_constructed(v, pi(5, 6, 7, 1), pi(70, 0, 0, 1))
+    # A threshold of 0 still leaves out voxels that are 0.
+    v = make(impl, 1.0, 1, 1, 0, 0, False)
+    for voxel in voxels:
+        seed(v, 1.0, *voxel)
+    check_constructed(v, pi(1, 2, 3, 1), pi(5, 6, 7, 1), pi(70, 0, 0, 1))
+
+
+def get_all_points_compressed_plain_matches_compress_mode(impl):
+    # With thresholds 0 and 1 no voxel is between them, so both modes agree
+    # on what is constructed.
+    def groups(compress):
+        v = make(impl, 1.0, 1, 1, 0, 1, compress)
+        scenario(v, with_dump=False)
+        return sorted((coords(group.point()), group.values())
+                      for group in v.get_all_points_compressed())
+
+    plain_groups = groups(False)
+    check(len(plain_groups) > 1)
+    check(plain_groups == groups(True), "the modes dump different groups")
+
+
+def dump_matches_replayed_results(impl):
+    for destroy, construct, compress in SCENARIO_PARAMS:
+        results, dumped = scenario(make(impl, 1.0, 1, 1, destroy, construct, compress))
+        replayed = replay(results)
+        check(replayed, f"compress = {compress}: nothing to replay")
+        if compress:
+            # The results are blocks, the dump has every constructed voxel of
+            # them.
+            check(dumped.constructed == expand_blocks(replayed), "compress = True: differs")
+        else:
+            check(dumped.points == replayed, "compress = False: get_all_points differs")
+            # Construct threshold 1: every voxel that is not 0 is
+            # constructed.
+            check(dumped.constructed == [pi(x, y, z, 1) for x, y, z, _ in replayed],
+                  "compress = False: get_all_points_compressed differs")
+
+
 # ------------------------------------------------------------ scenario
 
 
 def scenario_repeatable(impl):
     for destroy, construct, compress in SCENARIO_PARAMS:
         a = scenario(make(impl, 1.0, 1, 1, destroy, construct, compress))
-        for call, update in enumerate(a):
+        for call, update in enumerate(a.results):
             check(len(update) > 0, f"compress = {compress}: call {call} changed nothing")
         b = scenario(make(impl, 1.0, 1, 1, destroy, construct, compress))
         check(a == b, f"compress = {compress}: two runs differ")
@@ -942,7 +1141,7 @@ def scenario_repeatable(impl):
 def single_and_multi_agree():
     for destroy, construct, compress in SCENARIO_PARAMS:
         expected = scenario(make(SINGLE, 1.0, 1, 1, destroy, construct, compress))
-        for call, update in enumerate(expected):
+        for call, update in enumerate(expected.results):
             check(len(update) > 0, f"compress = {compress}: call {call} changed nothing")
         for threads in (1, 2, 4, 8):
             multi = multi_threaded("multi", threads)
@@ -958,7 +1157,7 @@ def multi_thread_count_zero():
 def single_and_wgpu_agree():
     for destroy, construct, compress in SCENARIO_PARAMS:
         expected = scenario(make(SINGLE, 1.0, 1, 1, destroy, construct, compress))
-        for call, update in enumerate(expected):
+        for call, update in enumerate(expected.results):
             check(len(update) > 0, f"compress = {compress}: call {call} changed nothing")
         got = scenario(make(WGPU, 1.0, 1, 1, destroy, construct, compress))
         check(got == expected, f"compress = {compress}: differs")
@@ -982,6 +1181,21 @@ def compress_helpers_self_check():
     check(block(5, 9, 7, 0) == pi(4, 8, 6, 0))
     check(block(-1, -1, -1, block_bit(-1, -1, -1)) == pi(-4, -4, -2, 1 << 31))
     check(block(-5, -9, -6, 0) == pi(-8, -12, -6, 0))
+
+
+def dump_helpers_self_check():
+    values = [0] * POINTS_IN_VOXEL_GROUP
+    # Word 7 = 0b111 is page (1, 1, 1), 41 = 0b101001 is page (3, 0, 2).
+    values[7] = 1 << 57
+    values[41] = 1 | 1 << 63
+    group = rv.CompressedVoxelGroup(rv.PointI(-1, 0, 2, 0), values)
+    check(decode_groups([group]) == sorted([pi(-64 + 5, 6, 128 + 7, 1), pi(-64 + 12, 0, 128 + 8, 1),
+                                            pi(-64 + 15, 3, 128 + 11, 1)]))
+    blocks = [block(-1, -1, -1, block_bit(-1, -1, -1)),
+              block(5, 6, 7, block_bit(5, 6, 7) | block_bit(4, 4, 6))]
+    check(expand_blocks(blocks) == sorted([pi(-1, -1, -1, 1), pi(5, 6, 7, 1), pi(4, 4, 6, 1)]))
+    check(replay([[pi(1, 0, 0, 3), pi(2, 0, 0, 4)], [pi(1, 0, 0, 0), pi(3, 0, 0, 5)]])
+          == [pi(2, 0, 0, 4), pi(3, 0, 0, 5)])
 
 
 # --------------------------------------------------------------- table
@@ -1014,6 +1228,7 @@ TEST_CASES = [
     once(multipliers_keywords),
     once(multipliers_rejects_out_of_range),
     once(multipliers_setters),
+    once(compressed_voxel_group_constructor),
     per_impl(constructors_reject_out_of_range),
     per_impl(constructors_accept_u32_max),
     per_impl(constructors_accept_keywords),
@@ -1083,6 +1298,21 @@ TEST_CASES = [
     per_impl(set_multipliers_applies_to_next_call),
     per_impl(set_multipliers_rejects_wrong_type),
     per_impl(set_multipliers_same_as_constructed),
+    per_impl(get_all_points_result_types),
+    per_impl(get_all_points_empty),
+    per_impl(get_all_points_single_target),
+    per_impl(get_all_points_zero_intensity_target),
+    per_impl(get_all_points_emptied_page_gone),
+    per_impl(get_all_points_negative_and_large_coords),
+    per_impl(get_all_points_with_compress_returns_values),
+    per_impl(get_all_points_does_not_change_state),
+    per_impl(get_all_points_compressed_empty),
+    per_impl(get_all_points_compressed_single_voxel),
+    per_impl(get_all_points_compressed_group_keys),
+    per_impl(get_all_points_compressed_destroyed_group_removed),
+    per_impl(get_all_points_compressed_plain_threshold),
+    per_impl(get_all_points_compressed_plain_matches_compress_mode),
+    per_impl(dump_matches_replayed_results),
     per_impl(scenario_repeatable),
     once(single_and_multi_agree, "single_threaded", "multi_threaded"),
     once(multi_thread_count_zero, "multi_threaded"),
@@ -1090,6 +1320,7 @@ TEST_CASES = [
     once(wgpu_rejects_zero_buckets, "wgpu"),
     once(wgpu_memory_size_grows, "wgpu"),
     once(compress_helpers_self_check),
+    once(dump_helpers_self_check),
 ]
 
 if __name__ == "__main__":
