@@ -67,3 +67,17 @@ The JS tests of the `wgpu` feature run on Node.js, which has no WebGPU, so they 
 Two scenarios are generated: `room`, a sensor circling inside a box room with rays in every direction, and `cone`, a static sensor whose rays all end on a small patch of a wall (many rays hitting the same voxels). The `match` column tells whether an implementation returned the same voxels as the first one run on the workload. A run that panics is reported as such and the sweep goes on.
 
 `FEATURES` picks the implementations built (default `single_threaded,multi_threaded,wgpu`), e.g. `FEATURES=single_threaded,multi_threaded ./bench.sh` on a machine without a GPU. The benchmark itself is `benches/voxelizer.rs`, also runnable with `cargo bench --features multi_threaded,wgpu --bench voxelizer -- <options>`.
+
+### Quick check while optimizing
+
+`./bench.sh --check` runs a fixed set of four cases (`compress` on) on every implementation for about a minute and compares the run with a saved baseline and with the previous run. Save the baseline before changing anything, then run the check after every change:
+
+```bash
+./bench.sh --check --save-baseline   # on the code you start from
+./bench.sh --check                   # after a change
+./bench.sh --check --impls st        # only the implementation you work on
+```
+
+Per case it prints the median `ms/frame` over the reps, `±` (median absolute deviation of the reps), and the change against the baseline and the previous run: `faster` or `slower` only when the change is larger than `--threshold` (5% by default) and twice the `±` of both runs, `~` otherwise. `output` is `CHANGED` when the voxels returned differ from the baseline, which an optimization should never do. A summary line per implementation gives the geometric mean over the cases.
+
+Runs are written to `target/bench/check/runs/`, the baseline to `target/bench/check/baseline.csv`. Compare runs of the same machine and the same `--impls` only. On laptops the numbers depend a lot on the power profile and on other programs: use a performance profile and close heavy programs. On CPUs with performance and efficiency cores, `st` and the host side of `wgpu` are pinned to one performance core (`--pin` changes or disables it), `mt` runs on every CPU. `wgpu` timings are noisier than the CPU ones, its bands are wider. `./bench.sh --check --help` lists the options.

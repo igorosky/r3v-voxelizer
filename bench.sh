@@ -6,11 +6,22 @@
 #   ./bench.sh --quick                  smaller sweep
 #   ./bench.sh --no-plot --impls st,mt  only the CPU implementations, no plots
 #   ./bench.sh --help                   every option of the benchmark
+#   ./bench.sh --check                  about a minute, compared with the
+#                                       baseline and the previous run
+#   ./bench.sh --check --save-baseline  the same, then saved as the baseline
+#   ./bench.sh --check --help           every option of the check
 #
-# Every argument but --no-plot goes to the benchmark (benches/voxelizer.rs).
-# Results land in target/bench/<date>/: results.csv, run.log (everything the
-# benchmark printed) and, with docker, the plots of benches/plot.py, which
-# runs in an image built from benches/Dockerfile.
+# Every argument but --no-plot and --check goes to the benchmark
+# (benches/voxelizer.rs). Results land in target/bench/<date>/: results.csv,
+# run.log (everything the benchmark printed) and, with docker, the plots of
+# benches/plot.py, which runs in an image built from benches/Dockerfile.
+#
+# --check runs benches/check.rs instead, a fixed small set of cases meant for
+# optimization work: each case is reported as faster, slower or within the
+# noise (~) of the baseline and of the previous run, and output tells whether
+# the voxels returned changed. Runs land in target/bench/check/runs/, the
+# baseline in target/bench/check/baseline.csv. Compare runs of the same
+# machine only.
 #
 # FEATURES picks the implementations built, e.g.
 # FEATURES=single_threaded,multi_threaded on a machine without a GPU. The
@@ -23,23 +34,38 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 features=${FEATURES:-single_threaded,multi_threaded,wgpu}
-bench=(cargo bench --no-default-features --features="$features" --bench voxelizer)
+bench=(cargo bench --no-default-features --features="$features")
 
 plot=1
+check=0
+help=0
 args=()
 for arg in "$@"; do
     case "$arg" in
         --no-plot) plot=0 ;;
-        --help | -h)
-            "${bench[@]}" -- --help
-            exit
-            ;;
+        --check) check=1 ;;
+        --help | -h) help=1 ;;
         *) args+=("$arg") ;;
     esac
 done
 
+if [[ $check -eq 1 ]]; then
+    bench+=(--bench check)
+else
+    bench+=(--bench voxelizer)
+fi
+
+if [[ $help -eq 1 ]]; then
+    "${bench[@]}" -- --help
+    exit
+fi
+
 # Built first, so that the log holds only what the benchmark prints
 "${bench[@]}" --no-run
+
+if [[ $check -eq 1 ]]; then
+    exec "${bench[@]}" --quiet -- "${args[@]}"
+fi
 
 out=target/bench/$(date +%Y%m%d-%H%M%S)
 mkdir -p "$out"

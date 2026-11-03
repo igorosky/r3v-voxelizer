@@ -949,6 +949,7 @@ dependencies = [
  "futures-channel",
  "hashbrown 0.17.1",
  "js-sys",
+ "libc",
  "libtest-mimic",
  "pollster",
  "pyo3",

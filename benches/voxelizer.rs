@@ -21,51 +21,26 @@
     allow(unused)
 )]
 
+mod common;
+
 use std::{
-    f32::consts::TAU,
     fs::{self, File},
-    hash::{DefaultHasher, Hash, Hasher},
     io::{BufWriter, Write},
-    num::NonZeroUsize,
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
     process,
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "multi_threaded")]
-use r3v_voxelizer::MultiThreaded;
-#[cfg(feature = "single_threaded")]
-use r3v_voxelizer::SingleThreaded;
+#[cfg(feature = "wgpu")]
+use common::adapter;
+use common::{
+    DEFAULT_BUCKETS, Impl, MAX_INTENSITY, Measurement, PARAMS, Scenario, cpus, fail, impl_names,
+    implementations, list, measure, number, workload,
+};
 #[cfg(feature = "wgpu")]
 use r3v_voxelizer::WgpuAccelerated;
-use r3v_voxelizer::{Multipliers, Voxelizer, VoxelizerParams, geometry::PointF};
-
-/// Size of a voxel. Workloads are generated in voxels and scaled by it.
-const RESOLUTION: f32 = 0.1;
-/// `compress` is set by every run.
-const PARAMS: VoxelizerParams = VoxelizerParams {
-    resolution: RESOLUTION,
-    multipliers: Multipliers {
-        intensity: 1.0,
-        hit: 1,
-        target: 4,
-    },
-    destroy_threshold: 2,
-    construct_threshold: 8,
-    max_value: 64,
-    compress: false,
-};
-/// Points get intensities `1..=MAX_INTENSITY`.
-const MAX_INTENSITY: u32 = 10;
-/// Points land up to this many voxels in front of the wall their ray hits,
-/// so later rays pass through voxels earlier ones ended in.
-const NOISE: f32 = 2.0;
-/// Share of the rays of `room` ending on an obstacle inside the room.
-const OBSTACLE_RATIO: f32 = 0.05;
-/// Half size, in voxels, of the wall patch every ray of `cone` ends on.
-const CONE_PATCH: f32 = 4.0;
-const DEFAULT_BUCKETS: u32 = 1 << 17;
+use r3v_voxelizer::{Multipliers, VoxelizerParams};
 
 const USAGE: &str = "\
 Usage: cargo bench --features <implementations> --bench voxelizer -- [options]
@@ -90,276 +65,6 @@ Lists are comma separated, defaults in brackets.
                     --frames 5 (other options override it)
   --help            print this
 ";
-
-/// Tiny LCG (the one of the unit tests), so that workloads need no extra
-/// dependency and are the same on every run.
-struct Rng(u64);
-
-impl Rng {
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.0 >> 33) as u32
-    }
-    /// Uniform in `0.0..1.0`.
-    fn unit(&mut self) -> f32 {
-        // 24 bits fit an f32 exactly
-        (self.next_u32() >> 7) as f32 / (1 << 24) as f32
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Scenario {
-    Room,
-    Cone,
-}
-
-impl Scenario {
-    fn name(self) -> &'static str {
-        match self {
-            Scenario::Room => "room",
-            Scenario::Cone => "cone",
-        }
-    }
-    fn parse(name: &str) -> Option<Self> {
-        [Scenario::Room, Scenario::Cone]
-            .into_iter()
-            .find(|scenario| scenario.name() == name)
-    }
-}
-
-/// One `add_points` call.
-struct Frame {
-    sensor: PointF,
-    points: Vec<PointF>,
-    /// Voxels the rays march through.
-    steps: u64,
-}
-
-/// Uniformly distributed on the unit sphere.
-fn random_direction(rng: &mut Rng) -> [f32; 3] {
-    let z = 2.0 * rng.unit() - 1.0;
-    let angle = TAU * rng.unit();
-    let r = (1.0 - z * z).sqrt();
-    [r * angle.cos(), r * angle.sin(), z]
-}
-
-fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let len = v.iter().map(|c| c * c).sum::<f32>().sqrt();
-    v.map(|c| c / len)
-}
-
-/// Distance from `origin` along `dir` to the walls of the box
-/// `-half..half` that holds `origin`.
-fn wall_distance(origin: [f32; 3], dir: [f32; 3], half: f32) -> f32 {
-    origin
-        .iter()
-        .zip(dir)
-        .filter(|(_, d)| *d != 0.0)
-        .map(|(o, d)| (half.copysign(d) - o) / d)
-        .fold(f32::INFINITY, f32::min)
-}
-
-/// Voxel holding `p`, computed the way the voxelizers do.
-fn voxel(p: &PointF) -> [i64; 3] {
-    [p.x, p.y, p.z].map(|c| (c / RESOLUTION).floor() as i64)
-}
-
-fn workload(scenario: Scenario, points: usize, range: u32, frames: usize) -> Vec<Frame> {
-    let half = range as f32;
-    let mut rng = Rng(0x5EED);
-    (0..frames)
-        .map(|frame| {
-            let [x, y] = match scenario {
-                // Circles a quarter of the way to the walls
-                Scenario::Room => {
-                    let angle = frame as f32 * 0.05;
-                    [half / 4.0 * angle.cos(), half / 4.0 * angle.sin()]
-                }
-                Scenario::Cone => [0.0, 0.0],
-            };
-            // Off the voxel grid
-            let origin = [x + 0.37, y + 0.61, 0.13];
-            let points: Vec<_> = (0..points)
-                .map(|_| {
-                    let dir = match scenario {
-                        Scenario::Room => random_direction(&mut rng),
-                        Scenario::Cone => {
-                            let spread = CONE_PATCH / half;
-                            normalize([
-                                1.0,
-                                spread * (2.0 * rng.unit() - 1.0),
-                                spread * (2.0 * rng.unit() - 1.0),
-                            ])
-                        }
-                    };
-                    let mut dist = wall_distance(origin, dir, half) - NOISE * rng.unit();
-                    if scenario == Scenario::Room && rng.unit() < OBSTACLE_RATIO {
-                        dist *= rng.unit();
-                    }
-                    let [x, y, z] = [0, 1, 2].map(|a| (origin[a] + dir[a] * dist) * RESOLUTION);
-                    let i = (1 + rng.next_u32() % MAX_INTENSITY) as f32;
-                    PointF { x, y, z, i }
-                })
-                .collect();
-            let [x, y, z] = origin.map(|c| c * RESOLUTION);
-            let sensor = PointF { x, y, z, i: 1.0 };
-            let from = voxel(&sensor);
-            let steps = points
-                .iter()
-                .map(|p| {
-                    voxel(p)
-                        .into_iter()
-                        .zip(from)
-                        .map(|(a, b)| a.abs_diff(b))
-                        .sum::<u64>()
-                })
-                .sum();
-            Frame {
-                sensor,
-                points,
-                steps,
-            }
-        })
-        .collect()
-}
-
-/// One implementation to benchmark.
-struct Impl {
-    /// `st`, `mt` or `wgpu`
-    name: &'static str,
-    /// Worker threads of `mt`
-    threads: Option<usize>,
-    /// Hashmap buckets of `wgpu`
-    buckets: Option<u32>,
-    /// `None` when the voxelizer cannot be created
-    create: Box<dyn Fn(VoxelizerParams) -> Option<Box<dyn Voxelizer>>>,
-}
-
-impl Impl {
-    fn label(&self) -> String {
-        match self.threads {
-            Some(threads) => format!("{}/{threads}", self.name),
-            None => self.name.to_owned(),
-        }
-    }
-}
-
-fn implementations(options: &Options) -> Vec<Impl> {
-    let wanted = |name: &str| {
-        options
-            .impls
-            .as_ref()
-            .is_none_or(|impls| impls.iter().any(|n| n == name))
-    };
-    let mut impls = Vec::new();
-    #[cfg(feature = "single_threaded")]
-    if wanted("st") {
-        impls.push(Impl {
-            name: "st",
-            threads: None,
-            buckets: None,
-            create: Box::new(|params| -> Option<Box<dyn Voxelizer>> {
-                Some(Box::new(SingleThreaded::new(params)))
-            }),
-        });
-    }
-    #[cfg(feature = "multi_threaded")]
-    if wanted("mt") {
-        for &threads in &options.threads {
-            impls.push(Impl {
-                name: "mt",
-                threads: Some(threads),
-                buckets: None,
-                create: Box::new(move |params| -> Option<Box<dyn Voxelizer>> {
-                    let voxelizer = MultiThreaded::new(params, threads).ok()?;
-                    Some(Box::new(voxelizer))
-                }),
-            });
-        }
-    }
-    #[cfg(feature = "wgpu")]
-    if wanted("wgpu") {
-        let buckets = options.buckets;
-        impls.push(Impl {
-            name: "wgpu",
-            threads: None,
-            buckets: Some(buckets),
-            create: Box::new(move |params| -> Option<Box<dyn Voxelizer>> {
-                let voxelizer = pollster::block_on(WgpuAccelerated::new(params, buckets))?;
-                Some(Box::new(voxelizer))
-            }),
-        });
-    }
-    for (name, feature, built) in [
-        ("st", "single_threaded", cfg!(feature = "single_threaded")),
-        ("mt", "multi_threaded", cfg!(feature = "multi_threaded")),
-        ("wgpu", "wgpu", cfg!(feature = "wgpu")),
-    ] {
-        if !built && options.impls.is_some() && wanted(name) {
-            println!("{name} skipped: built without the {feature} feature");
-        }
-    }
-    impls
-}
-
-/// The GPU adapter `WgpuAccelerated` picks, it asks for the default one too.
-#[cfg(feature = "wgpu")]
-fn adapter() -> String {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) {
-        Ok(adapter) => {
-            let info = adapter.get_info();
-            format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type)
-        }
-        Err(err) => format!("none ({err})"),
-    }
-}
-
-struct Measurement {
-    setup: Duration,
-    /// Duration of every timed frame
-    times: Vec<Duration>,
-    /// Voxels returned by every timed frame
-    changed: Vec<usize>,
-    /// Hash of the sorted results of every frame
-    digest: u64,
-}
-
-/// Runs every frame on a new voxelizer, timing the ones after `warmup`.
-fn measure(
-    imp: &Impl,
-    params: VoxelizerParams,
-    frames: &[Frame],
-    warmup: usize,
-) -> Option<Measurement> {
-    let start = Instant::now();
-    let mut voxelizer = (imp.create)(params)?;
-    let setup = start.elapsed();
-    let mut hasher = DefaultHasher::new();
-    let mut times = Vec::new();
-    let mut changed = Vec::new();
-    for (n, frame) in frames.iter().enumerate() {
-        let start = Instant::now();
-        let mut result = voxelizer.add_points(frame.sensor.clone(), &frame.points);
-        let time = start.elapsed();
-        if n >= warmup {
-            times.push(time);
-            changed.push(result.len());
-        }
-        // Implementations return the voxels in different orders
-        result.sort_unstable();
-        result.hash(&mut hasher);
-    }
-    Some(Measurement {
-        setup,
-        times,
-        changed,
-        digest: hasher.finish(),
-    })
-}
 
 /// Frame durations in milliseconds, percentiles are nearest rank.
 struct Stats {
@@ -399,31 +104,11 @@ struct Options {
     csv: Option<PathBuf>,
 }
 
-fn fail(message: &str) -> ! {
-    eprintln!("error: {message}");
-    process::exit(2)
-}
-
-fn list<T>(flag: &str, value: &str, parse: impl Fn(&str) -> Option<T>) -> Vec<T> {
-    value
-        .split(',')
-        .map(|item| {
-            parse(item.trim()).unwrap_or_else(|| fail(&format!("invalid {flag} value: {item}")))
-        })
-        .collect()
-}
-
-fn number<T: std::str::FromStr>(flag: &str, value: &str) -> T {
-    value
-        .parse()
-        .unwrap_or_else(|_| fail(&format!("invalid {flag} value: {value}")))
-}
-
 impl Options {
     fn parse() -> Self {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let quick = args.iter().any(|arg| arg == "--quick");
-        let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        let cpus = cpus();
         let mut threads: Vec<_> = (0..)
             .map(|shift| 1 << shift)
             .take_while(|&threads| threads < cpus)
@@ -462,13 +147,7 @@ impl Options {
                     print!("{USAGE}");
                     process::exit(0)
                 }
-                "--impls" => {
-                    options.impls = Some(list(&arg, &value(), |name| {
-                        ["st", "mt", "wgpu"]
-                            .contains(&name)
-                            .then(|| name.to_owned())
-                    }))
-                }
+                "--impls" => options.impls = Some(impl_names(&arg, &value())),
                 "--threads" => {
                     options.threads = list(&arg, &value(), |n| n.parse().ok().filter(|&n| n > 0))
                 }
@@ -610,7 +289,7 @@ impl Row<'_> {
 
 fn main() {
     let options = Options::parse();
-    let impls = implementations(&options);
+    let impls = implementations(options.impls.as_deref(), &options.threads, options.buckets);
     if impls.is_empty() {
         println!(
             "no implementation to run, enable the single_threaded, multi_threaded or wgpu \
@@ -619,7 +298,7 @@ fn main() {
         return;
     }
 
-    let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    let cpus = cpus();
     let labels: Vec<_> = impls.iter().map(Impl::label).collect();
     println!("cpu threads:     {cpus}");
     println!("implementations: {}", labels.join(", "));
