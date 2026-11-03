@@ -67,6 +67,8 @@ baseline and with the previous run. Defaults in brackets.
   --save-baseline    after the comparison, save this run as the baseline
   --baseline FILE    compare with FILE (a run of target/bench/check/runs)
                      instead of the saved baseline
+  --no-save          do not save the run, the next run compares with the
+                     same previous run (bench.sh --flamegraph passes it)
   --help             print this
 
 Columns: ms/frame is the median over reps of the mean add_points duration,
@@ -140,6 +142,8 @@ struct Options {
     pin: Pin,
     save_baseline: bool,
     baseline: Option<PathBuf>,
+    /// Not written to `runs`, it does not become the previous run
+    no_save: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +174,7 @@ impl Options {
             pin: Pin::Auto,
             save_baseline: false,
             baseline: None,
+            no_save: false,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -205,8 +210,12 @@ impl Options {
                 }
                 "--save-baseline" => options.save_baseline = true,
                 "--baseline" => options.baseline = Some(value().into()),
+                "--no-save" => options.no_save = true,
                 _ => fail(&format!("unknown option {arg}, see --help")),
             }
+        }
+        if options.no_save && options.save_baseline {
+            fail("--no-save and --save-baseline exclude each other");
         }
         if options.threads == 0 {
             fail("--threads must be at least 1");
@@ -969,6 +978,11 @@ fn main() {
         now,
     );
 
+    if options.no_save {
+        println!();
+        println!("run not saved (--no-save)");
+        return;
+    }
     let path = runs.join(format!("{now}.csv"));
     let saved = fs::create_dir_all(&runs).and_then(|()| fs::write(&path, run.to_csv()));
     if let Err(err) = saved {
