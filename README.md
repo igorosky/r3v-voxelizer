@@ -81,3 +81,26 @@ Two scenarios are generated: `room`, a sensor circling inside a box room with ra
 Per case it prints the median `ms/frame` over the reps, `±` (median absolute deviation of the reps), and the change against the baseline and the previous run: `faster` or `slower` only when the change is larger than `--threshold` (5% by default) and twice the `±` of both runs, `~` otherwise. `output` is `CHANGED` when the voxels returned differ from the baseline, which an optimization should never do. A summary line per implementation gives the geometric mean over the cases.
 
 Runs are written to `target/bench/check/runs/`, the baseline to `target/bench/check/baseline.csv`. Compare runs of the same machine and the same `--impls` only. On laptops the numbers depend a lot on the power profile and on other programs: use a performance profile and close heavy programs. On CPUs with performance and efficiency cores, `st` and the host side of `wgpu` are pinned to one performance core (`--pin` changes or disables it), `mt` runs on every CPU. `wgpu` timings are noisier than the CPU ones, its bands are wider. `./bench.sh --check --help` lists the options.
+
+The check is built with the `bench-check` profile (`Cargo.toml`): release with `debug = "line-tables-only"`, so a profiler such as `perf` maps samples to source lines. The binary is in `target/bench-check/deps/check-*`, apart from the other benches.
+
+### Flamegraphs
+
+`--flamegraph` runs the benchmark (with `--check` the check) through [`cargo flamegraph`](https://github.com/flamegraph-rs/flamegraph) (`cargo install flamegraph`, needs `perf`):
+
+```bash
+./bench.sh --check --flamegraph --impls st
+```
+
+It builds the `bench-check` profile with `RUSTFLAGS="-C force-frame-pointers=yes"` in `target/flamegraph/`, so the other builds are kept, and perf walks the call stacks through the frame pointers. The flamegraph is written to `target/bench/flamegraph/<date>-<benchmark>.svg`. Next to it, `<date>-<benchmark>.txt` lists every function sorted by CPU time, and the top of the list is printed:
+
+```
+12.138 s of CPU time, summed over every thread
+
+            total              self  function
+ 94.67%   11.491 s  18.29%    2.221 s  <SingleThreaded as Voxelizer>::add_points
+ 73.05%    8.867 s  66.79%    8.107 s  <SingleThreaded>::hit_voxel
+  8.98%    1.090 s   8.98%    1.090 s  bmi2::index_of_unchecked::<u16, 3>
+```
+
+`total` is the time with the functions called (counted once per stack, so recursion does not count twice), `self` the time in the function itself, both summed over every thread. Inlined functions are listed on their own. Names are shortened to the type, or the last module of a free function, generic arguments stay. `benches/hotspots.awk` makes the table from the folded stacks of the latest run, `target/flamegraph/stacks.folded`; the perf data of the latest run is `target/flamegraph/perf.data` (`perf report -i target/flamegraph/perf.data`). Frame pointers and perf slow the run down a little, so a profiled check run is not saved (`--no-save`) and its comparisons are only a hint. Profile one implementation at a time. perf samples every running thread at 997 Hz, and cargo flamegraph keeps the whole `perf script` output in memory (a few KB per sample), so with `mt` the frequency is divided by its thread count (`--threads`, every CPU by default): about 997 samples a second whatever the implementation. perf needs `kernel.perf_event_paranoid` at 2 or lower (Ubuntu sets 4): `sudo sysctl kernel.perf_event_paranoid=2`.

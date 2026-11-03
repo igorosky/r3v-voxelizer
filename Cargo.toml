@@ -8,7 +8,6 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
-dashmap = { version = "6.2.1", optional = true }
 futures-channel = { version = "0.3.34", optional = true }
 hashbrown = { version = "0.17.1", optional = true }
 js-sys = { version = "0.3.106", optional = true }
@@ -40,7 +39,7 @@ cpp = ["dep:pollster", "dep:cbindgen"]
 js = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys"]
 multi_threaded = [
     "dep:rayon",
-    "dep:dashmap",
+    "dep:hashbrown",
     "dep:rustc-hash",
     "dep:zorder",
     "dep:static_assertions",
@@ -82,3 +81,10 @@ harness = false
 [[bench]]
 name = "check"
 harness = false
+
+# Used by ./bench.sh --check and --flamegraph: bench (release) plus line
+# tables, so that perf and other profilers can map samples to source lines.
+# Built in target/bench-check, apart from the other benches.
+[profile.bench-check]
+inherits = "bench"
+debug = "line-tables-only"
