@@ -1,0 +1,88 @@
+name: Coverage
+
+# Runs on master and on pull requests with the `coverage` label. The report is
+# a coverview page: an artifact of every run, on GitHub Pages for master.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    # On pull requests only with the label, and adding another label does not
+    # start a new run.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'coverage') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'coverage'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The patch report needs the merge base with master.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # Same as in ci.yml: no GPU on the runners, the wgpu tests use lavapipe
+      # pinned to the noble release (Mesa 25.2.8 from noble-updates segfaults).
+      - name: Install lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends --allow-downgrades \
+            libvulkan1 mesa-vulkan-drivers=24.0.5-1ubuntu1
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json)
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - run: ./coverage.sh
+
+      - uses: ./.github/actions/coverview
+        with:
+          info: target/coverage/*.info
+          pathspec: "*.rs"
+          title: r3v-voxelizer coverage
+          dataset: cargo-test
+          pages: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' }}
+
+  deploy:
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    needs: coverage
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
