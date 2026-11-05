@@ -111,3 +111,56 @@ Without `compress` a voxel counts as constructed once it reaches
 
 In C and C++ both return an empty result for NULL. The JS `WgpuAccelerated`
 returns Promises from both, and they reject while another call is running.
+
+## Downsampling
+
+Downsampling gives a coarser copy of the map: one downsampled voxel stands for
+a cube of `size`x`size`x`size` voxels. It is present while at least
+`threshold` voxels of its cube are constructed. Downsampled voxel `D` holds
+voxel `v` when `D = floor(v / size)` on every axis.
+
+It needs `compress` and is off until `set_downsampling_params(size,
+threshold)` is called. While it is off `add_points` does no extra work.
+`size` is a power of two from 2 to 128, `threshold` is from 1 to `size^3`.
+Other values are refused and nothing changes.
+
+`get_downsampled()` returns the downsampled voxels that changed since its
+previous call, in the format of compress mode `add_points` (4x4x2 blocks with
+their whole mask, `i = 0` for an emptied block), in downsampled voxel
+coordinates. A downsampled voxel that disappears and comes back between two
+calls is not reported. `get_all_downsampled()` returns every present
+downsampled voxel grouped like `get_all_points_compressed`, also in
+downsampled coordinates. Both are empty while downsampling is off.
+
+The downsampled state is built from the current voxels by the next
+`get_downsampled` after:
+
+- `set_downsampling_params` (also with the same params),
+- `clear_downsampled()`, which keeps the params, for a consumer that lost its
+  copy,
+- `clear()`.
+
+That call returns every present block, so the consumer should drop what it had
+before. `disable_downsampling()` turns it off and frees its state.
+
+`WgpuAccelerated` downsamples on the CPU, from the blocks `add_points` reads
+back anyway. While downsampling is on it keeps a copy of the occupancy of the
+non empty 4x4x4 pages in host memory. Only the first `get_downsampled` after
+the state got dropped reads the map back from the GPU.
+
+| Language | Turn on | Changes | All |
+|---|---|---|---|
+| Rust | `set_downsampling_params(size, threshold)`, a `Result` | `get_downsampled()` | `get_all_downsampled()` |
+| C / C++ | `set_downsampling_params(voxelizer, size, threshold)`, `false` when refused | `get_downsampled(voxelizer)`, a `VoxelsUpdate` | `get_all_downsampled(voxelizer)`, `VoxelGroups` |
+| Python | raises `ValueError` when refused | list of `PointI` | list of `CompressedVoxelGroup` |
+| JS | throws when refused | array of `PointI` | array of `CompressedVoxelGroup` |
+
+The JS `WgpuAccelerated` returns Promises from `get_downsampled` and
+`get_all_downsampled`.
+
+## Clearing
+
+`clear()` removes every voxel, the voxelizer then works like a new one with
+the same parameters and multipliers. Downsampling keeps its params. In C and
+C++ it is `clear_voxelizer(voxelizer)`.
+

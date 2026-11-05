@@ -30,6 +30,10 @@ The library is `target/release/libr3v_voxelizer.so`, the headers are in
 | `get_all_points(voxelizer)` | Returns a `VoxelsUpdate` |
 | `get_all_points_compressed(voxelizer)` | Returns `VoxelGroups` |
 | `set_multipliers(voxelizer, multipliers)`, `get_multipliers(voxelizer)` | |
+| `set_downsampling_params(voxelizer, size, threshold)` | `false` when refused, see [downsampling](parameters.md#downsampling) |
+| `get_downsampled(voxelizer)`, `get_all_downsampled(voxelizer)` | `VoxelsUpdate` and `VoxelGroups` |
+| `disable_downsampling(voxelizer)`, `clear_downsampled(voxelizer)` | |
+| `clear_voxelizer(voxelizer)` | Removes every voxel (`clear` in the other languages) |
 | `drop_update`, `drop_voxel_groups`, `drop_voxelizer` | Free what the functions above returned |
 
 Every function accepts NULL and does nothing (or returns an empty result) for
@@ -70,7 +74,8 @@ voxelizer.set_multipliers(rv.Multipliers(2.0, 1, 3))
 ```
 
 `PointI` and `CompressedVoxelGroup` fields are read with methods (`p.x()`,
-`group.values()`).
+`group.values()`). `set_downsampling_params` raises `ValueError` for params it
+refuses and `OverflowError` for a size outside `0..=255`.
 
 With `--features python,wgpu` the module also has `WgpuAccelerated`. Its
 constructor takes the usual arguments plus `bucket_count` (see
@@ -136,10 +141,10 @@ const update = await voxelizer.add_points(sensor, points);
   shaders, `bucketCount` is 0 or the hashmap does not fit the adapter's limits
   (see [GPU voxelizer](#gpu-voxelizer)).
 - `WgpuAccelerated.memory_size(bucketCount)` gives the GPU memory it takes.
-- `add_points`, `get_all_points` and `get_all_points_compressed` return
-  Promises.
+- `add_points`, `get_all_points`, `get_all_points_compressed`,
+  `get_downsampled` and `get_all_downsampled` return Promises.
 - Await each call before starting the next one. A call made while another one
-  is running rejects (`set_multipliers` and `get_multipliers` throw).
+  is running rejects (the ones that do not return a Promise throw).
 
 ### Tests on Node.js
 

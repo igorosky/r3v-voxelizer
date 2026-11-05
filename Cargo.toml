@@ -55,7 +55,9 @@ wgpu = [
     "dep:wgpu",
     "dep:bytemuck",
     "dep:futures-channel",
+    "dep:hashbrown",
     "dep:pollster",
+    "dep:rustc-hash",
     "dep:zorder",
 ]
 

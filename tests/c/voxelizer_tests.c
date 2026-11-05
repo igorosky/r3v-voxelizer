@@ -861,6 +861,125 @@ static void scenario_repeatable(const Impl *impl) {
 
 /* ------------------------------------------------------ NULL inputs */
 
+/* ------------------------------------------------------ downsampling */
+
+/* Decodes get_all_downsampled and compares it with expected downsampled
+ * voxels (i = 1), ignoring order. */
+static void check_downsampled(const void *voxelizer, const PointI *expected,
+                              size_t expected_len, const char *file, int line) {
+    VoxelGroups groups = get_all_downsampled(voxelizer);
+    size_t len;
+    PointI *got = decode_groups(groups, &len);
+    drop_voxel_groups(groups);
+    check_points(got, len, expected, expected_len, file, line);
+    free(got);
+}
+#define EXPECT_DOWNSAMPLED(voxelizer, ...)                                               \
+    check_downsampled((voxelizer), VOXELS(__VA_ARGS__), ARRAY_LEN(VOXELS(__VA_ARGS__)), \
+                      __FILE__, __LINE__)
+#define EXPECT_NONE_DOWNSAMPLED(voxelizer) \
+    check_downsampled((voxelizer), NULL, 0, __FILE__, __LINE__)
+
+static void downsampling_params_validated(const Impl *impl) {
+    void *v = plain(impl);
+    CHECK(!set_downsampling_params(v, 4, 1));
+    drop_voxelizer(v);
+    v = compressed(impl);
+    const uint8_t bad_sizes[] = {0, 1, 3, 6, 255};
+    for (size_t k = 0; k < ARRAY_LEN(bad_sizes); ++k) {
+        CHECK(!set_downsampling_params(v, bad_sizes[k], 1));
+    }
+    CHECK(!set_downsampling_params(v, 4, 0));
+    CHECK(!set_downsampling_params(v, 4, 65));
+    CHECK(set_downsampling_params(v, 4, 64));
+    CHECK(set_downsampling_params(v, 2, 1));
+    CHECK(set_downsampling_params(v, 128, 128u * 128u * 128u));
+    CHECK(set_downsampling_params(v, 128, 1));
+    /* A refused call keeps edge 128: voxel 100 is in D = 0 */
+    CHECK(!set_downsampling_params(v, 3, 1));
+    drop_update(from_above(v, 100, 0, 0, 1.0f));
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1));
+    drop_voxelizer(v);
+}
+
+static void downsampling_off_by_default(const Impl *impl) {
+    void *v = compressed(impl);
+    drop_update(from_above(v, 5, 6, 7, 1.0f));
+    EXPECT_NO_VOXELS(get_downsampled(v));
+    EXPECT_NONE_DOWNSAMPLED(v);
+    drop_voxelizer(v);
+}
+
+static void downsampling_reports_changes(const Impl *impl) {
+    void *v = compressed(impl);
+    CHECK(set_downsampling_params(v, 4, 1));
+    EXPECT_NO_VOXELS(get_downsampled(v));
+    drop_update(from_above(v, 5, 6, 7, 1.0f));
+    /* D = (1, 1, 1): block (0, 0, 0), bit 1 + 4 + 16 */
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1u << 21));
+    EXPECT_NO_VOXELS(get_downsampled(v));
+    EXPECT_DOWNSAMPLED(v, pi(1, 1, 1, 1));
+    /* Destroys (5, 6, 7), constructs (70, 6, 7): D = (17, 1, 1) */
+    drop_update(along_x(v, 5, 70, 6, 7, 1.0f));
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 0), block(17, 1, 1, block_bit(17, 1, 1)));
+    EXPECT_DOWNSAMPLED(v, pi(17, 1, 1, 1));
+    drop_voxelizer(v);
+}
+
+static void downsampling_threshold(const Impl *impl) {
+    /* Edge 2: voxels (2, 0, 0) and (3, 1, 1) are both in D = (1, 0, 0) */
+    void *v = compressed(impl);
+    CHECK(set_downsampling_params(v, 2, 2));
+    drop_update(from_above(v, 2, 0, 0, 1.0f));
+    EXPECT_NO_VOXELS(get_downsampled(v));
+    drop_update(from_above(v, 3, 1, 1, 1.0f));
+    EXPECT_VOXELS(get_downsampled(v), block(1, 0, 0, block_bit(1, 0, 0)));
+    /* Destroys (2, 0, 0), constructs (9, 0, 0) alone in D = (4, 0, 0) */
+    drop_update(along_x(v, 2, 9, 0, 0, 1.0f));
+    EXPECT_VOXELS(get_downsampled(v), block(1, 0, 0, 0));
+    EXPECT_NONE_DOWNSAMPLED(v);
+    drop_voxelizer(v);
+}
+
+static void downsampling_clear_and_disable(const Impl *impl) {
+    void *v = compressed(impl);
+    CHECK(set_downsampling_params(v, 4, 1));
+    drop_update(from_above(v, 0, 0, 0, 1.0f));
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1));
+    /* Everything again after the state got dropped */
+    clear_downsampled(v);
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1));
+    disable_downsampling(v);
+    drop_update(from_above(v, 4, 0, 0, 1.0f));
+    EXPECT_NO_VOXELS(get_downsampled(v));
+    EXPECT_NONE_DOWNSAMPLED(v);
+    CHECK(set_downsampling_params(v, 4, 1));
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1 | 1u << 1));
+    drop_voxelizer(v);
+}
+
+static void clear_voxelizer_removes_everything(const Impl *impl) {
+    void *v = plain(impl);
+    seed_at(v, 5, 6, 7, 3);
+    clear_voxelizer(v);
+    EXPECT_NO_VOXELS(get_all_points(v));
+    EXPECT_VOXELS(from_above(v, 5, 6, 7, 1.0f), pi(5, 6, 7, 1));
+    drop_voxelizer(v);
+
+    v = compressed(impl);
+    CHECK(set_downsampling_params(v, 4, 1));
+    drop_update(from_above(v, 5, 6, 7, 1.0f));
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1u << 21));
+    clear_voxelizer(v);
+    EXPECT_NO_VOXELS(get_all_points(v));
+    EXPECT_NONE_CONSTRUCTED(v);
+    EXPECT_NO_VOXELS(get_downsampled(v));
+    /* Like a new voxelizer, downsampling still on */
+    EXPECT_VOXELS(from_above(v, 5, 6, 7, 1.0f), pi(4, 4, 6, block_bit(5, 6, 7)));
+    EXPECT_VOXELS(get_downsampled(v), pi(0, 0, 0, 1u << 21));
+    drop_voxelizer(v);
+}
+
 static void null_points_zero_count(const Impl *impl) {
     void *v = plain(impl);
     VoxelsUpdate update = add_points(v, SENSOR, NULL, 0);
@@ -987,6 +1106,20 @@ static void dump_null_voxelizer(const Impl *unused) {
     drop_voxel_groups(groups);
 }
 
+static void downsampling_null_voxelizer(const Impl *unused) {
+    (void)unused;
+    CHECK(!set_downsampling_params(NULL, 4, 1));
+    disable_downsampling(NULL);
+    clear_voxelizer(NULL);
+    clear_downsampled(NULL);
+    VoxelsUpdate update = get_downsampled(NULL);
+    CHECK(update.data == NULL && update.len == 0);
+    drop_update(update);
+    VoxelGroups groups = get_all_downsampled(NULL);
+    CHECK(groups.data == NULL && groups.len == 0);
+    drop_voxel_groups(groups);
+}
+
 static void drop_voxel_groups_empty(const Impl *unused) {
     (void)unused;
     VoxelGroups empty = {NULL, 0};
@@ -1104,6 +1237,12 @@ const TestCase TEST_CASES[] = {
     PER_IMPL(get_all_points_compressed_plain_matches_compress_mode),
     PER_IMPL(dump_matches_replayed_results),
     PER_IMPL(scenario_repeatable),
+    PER_IMPL(downsampling_params_validated),
+    PER_IMPL(downsampling_off_by_default),
+    PER_IMPL(downsampling_reports_changes),
+    PER_IMPL(downsampling_threshold),
+    PER_IMPL(downsampling_clear_and_disable),
+    PER_IMPL(clear_voxelizer_removes_everything),
     PER_IMPL(null_points_zero_count),
     PER_IMPL(null_points_nonzero_count),
     GLOBAL(single_and_multi_agree),
@@ -1120,6 +1259,7 @@ const TestCase TEST_CASES[] = {
     GLOBAL(null_voxelizer),
     GLOBAL(multipliers_null_voxelizer),
     GLOBAL(dump_null_voxelizer),
+    GLOBAL(downsampling_null_voxelizer),
     GLOBAL(drop_voxel_groups_empty),
     GLOBAL(dump_helpers_self_check),
     GLOBAL(compress_helpers_self_check),

@@ -333,14 +333,22 @@ pub struct Measurement {
 }
 
 /// Runs every frame on a new voxelizer, timing the ones after `warmup`.
+/// With `downsampling` (edge, threshold) every frame is `add_points` and
+/// `get_downsampled`.
 pub fn measure(
     imp: &Impl,
     params: VoxelizerParams,
     frames: &[Frame],
     warmup: usize,
+    downsampling: Option<(u8, u32)>,
 ) -> Option<Measurement> {
     let start = Instant::now();
     let mut voxelizer = (imp.create)(params)?;
+    if let Some((size, threshold)) = downsampling {
+        voxelizer
+            .set_downsampling_params(size, threshold)
+            .unwrap_or_else(|err| fail(&format!("downsampling: {err}")));
+    }
     let setup = start.elapsed();
     let mut hasher = StableHasher::new();
     let mut times = Vec::new();
@@ -348,6 +356,10 @@ pub fn measure(
     for (n, frame) in frames.iter().enumerate() {
         let start = Instant::now();
         let mut result = voxelizer.add_points(frame.sensor.clone(), &frame.points);
+        let mut downsampled = match downsampling {
+            Some(_) => voxelizer.get_downsampled(),
+            None => Vec::new(),
+        };
         let time = start.elapsed();
         if n >= warmup {
             times.push(time);
@@ -356,6 +368,10 @@ pub fn measure(
         // Implementations return the voxels in different orders
         result.sort_unstable();
         result.hash(&mut hasher);
+        if downsampling.is_some() {
+            downsampled.sort_unstable();
+            downsampled.hash(&mut hasher);
+        }
     }
     Some(Measurement {
         setup,

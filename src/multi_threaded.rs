@@ -28,8 +28,9 @@ use rayon::{
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
-    Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, DownsamplingError, Multipliers,
+    POINTS_IN_VOXEL_GROUP, Voxelizer, VoxelizerParams,
+    downsampling::{Downsampling, compressed_pages},
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -73,6 +74,8 @@ pub struct MultiThreaded {
     max_value: u32,
     zorder: ZOrder,
     thread_pool: ThreadPool,
+    /// `None` while downsampling is off
+    downsampling: Option<Downsampling>,
 }
 
 /// A fine page, 4x4x4 voxels.
@@ -194,6 +197,7 @@ impl MultiThreaded {
             max_value,
             zorder: ZOrder::default(),
             thread_pool: ThreadPoolBuilder::new().num_threads(thread_count).build()?,
+            downsampling: None,
         })
     }
 }
@@ -218,6 +222,7 @@ impl Voxelizer for MultiThreaded {
             max_value,
             zorder,
             thread_pool,
+            downsampling,
         } = self;
         let march = March {
             resolution: *resolution,
@@ -260,6 +265,7 @@ impl Voxelizer for MultiThreaded {
         let mut emptied_compressed = Vec::new();
         if let Some(compressed_voxels) = compressed_voxels.as_mut() {
             let mut compressed_dedup = HashMap::default();
+            let mut downsampling = downsampling.as_mut();
             for crossing in shards
                 .iter_mut()
                 .flat_map(|shard| shard.crossings.drain(..))
@@ -295,6 +301,9 @@ impl Voxelizer for MultiThreaded {
                     }
                     *v
                 };
+                if let Some(downsampling) = downsampling.as_deref_mut() {
+                    downsampling.word_changed(page, v ^ bit, v);
+                }
                 let upper_bits = z as i32 & 2;
                 debug_assert!(upper_bits & !2 == 0);
                 compressed_dedup.insert(
@@ -399,6 +408,55 @@ impl Voxelizer for MultiThreaded {
     #[inline]
     fn multipliers(&self) -> Multipliers {
         self.multipliers
+    }
+    fn set_downsampling_params(
+        &mut self,
+        downsampled_voxel_size: u8,
+        downsampled_threshold: u32,
+    ) -> Result<(), DownsamplingError> {
+        self.downsampling = Some(Downsampling::new(
+            downsampled_voxel_size,
+            downsampled_threshold,
+            self.compressed_voxels.is_some(),
+        )?);
+        Ok(())
+    }
+    fn disable_downsampling(&mut self) {
+        self.downsampling = None;
+    }
+    fn get_downsampled(&mut self) -> Vec<PointI> {
+        let Some(downsampling) = self.downsampling.as_mut() else {
+            return Vec::new();
+        };
+        let compressed = self
+            .compressed_voxels
+            .as_ref()
+            .expect("downsampling needs compress");
+        downsampling.take_changes(|| compressed_pages(&self.zorder, compressed))
+    }
+    fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+        let Some(downsampling) = self.downsampling.as_ref() else {
+            return Vec::new();
+        };
+        let compressed = self
+            .compressed_voxels
+            .as_ref()
+            .expect("downsampling needs compress");
+        downsampling.all(&self.zorder, || compressed_pages(&self.zorder, compressed))
+    }
+    fn clear(&mut self) {
+        for shard in &mut self.shards {
+            shard.clear();
+        }
+        if let Some(compressed_voxels) = self.compressed_voxels.as_mut() {
+            compressed_voxels.clear();
+        }
+        self.clear_downsampled();
+    }
+    fn clear_downsampled(&mut self) {
+        if let Some(downsampling) = self.downsampling.as_mut() {
+            downsampling.reset();
+        }
     }
 }
 
@@ -629,6 +687,25 @@ impl Task {
 }
 
 impl Shard {
+    /// Removes every page, keeping the memory.
+    fn clear(&mut self) {
+        let Self {
+            index,
+            pages,
+            free,
+            snapshots,
+            maybe_empty,
+            points,
+            crossings,
+        } = self;
+        index.clear();
+        pages.clear();
+        free.clear();
+        snapshots.clear();
+        maybe_empty.clear();
+        points.clear();
+        crossings.clear();
+    }
     /// Applies the hits and then the targets of `tasks` that belong to this
     /// shard (number `n`), then records what changed.
     fn apply(&mut self, n: usize, tasks: &[Task], update: &Update) {
@@ -903,6 +980,7 @@ mod test {
     }
 
     crate::test::shared_tests!(MultiThreaded);
+    crate::test::downsampling_tests!(MultiThreaded);
 
     // ------------------------------------------------------------ constructor
 

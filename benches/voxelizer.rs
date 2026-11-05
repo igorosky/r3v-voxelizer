@@ -359,7 +359,7 @@ fn main() {
                     for imp in &impls {
                         // A panic (a bug of the implementation) ends only its run
                         let run = panic::catch_unwind(AssertUnwindSafe(|| {
-                            measure(imp, params.clone(), &frames, options.warmup)
+                            measure(imp, params.clone(), &frames, options.warmup, None)
                         }));
                         let (summary, matches) = match run {
                             Ok(None) => {

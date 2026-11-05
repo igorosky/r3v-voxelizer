@@ -1,8 +1,9 @@
 use rustc_hash::FxBuildHasher;
 
 use crate::{
-    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
-    Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, DownsamplingError, Multipliers,
+    POINTS_IN_VOXEL_GROUP, Voxelizer, VoxelizerParams,
+    downsampling::{Downsampling, compressed_pages},
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -33,6 +34,8 @@ pub struct SingleThreaded {
     construct_threshold: u32,
     max_value: u32,
     zorder: ZOrder,
+    /// `None` while downsampling is off
+    downsampling: Option<Downsampling>,
 }
 
 impl SingleThreaded {
@@ -61,6 +64,7 @@ impl SingleThreaded {
             construct_threshold,
             max_value,
             zorder: ZOrder::default(),
+            downsampling: None,
         }
     }
 }
@@ -108,7 +112,9 @@ impl Voxelizer for SingleThreaded {
             .filter(|(_, prev, voxel)| voxel != prev);
         if let Some(compressed_voxels) = self.compressed_voxels.as_mut() {
             let mut compressed_dedup = HashMap::default();
+            let mut downsampling = self.downsampling.as_mut();
             for (idx, prev, voxel) in iter {
+                let page = idx.0;
                 let [x, y, z] = self.zorder.coord_of(idx.1 as u64);
                 let idx2 = || {
                     self.zorder.index_of([
@@ -148,6 +154,9 @@ impl Voxelizer for SingleThreaded {
                     if *v & bit == 0 {
                         *v |= bit;
                         changed(*v);
+                        if let Some(downsampling) = downsampling.as_deref_mut() {
+                            downsampling.word_changed(page, *v ^ bit, *v);
+                        }
                     }
                 } else if prev > self.destroy_threshold
                     && voxel <= self.destroy_threshold
@@ -157,6 +166,9 @@ impl Voxelizer for SingleThreaded {
                     let v = &mut words[idx2()];
                     *v &= !bit;
                     changed(*v);
+                    if let Some(downsampling) = downsampling.as_deref_mut() {
+                        downsampling.word_changed(page, *v ^ bit, *v);
+                    }
                     if *v == 0 {
                         emptied_compressed.push(idx());
                     }
@@ -233,6 +245,55 @@ impl Voxelizer for SingleThreaded {
     #[inline]
     fn multipliers(&self) -> Multipliers {
         self.multipliers
+    }
+    fn set_downsampling_params(
+        &mut self,
+        downsampled_voxel_size: u8,
+        downsampled_threshold: u32,
+    ) -> Result<(), DownsamplingError> {
+        self.downsampling = Some(Downsampling::new(
+            downsampled_voxel_size,
+            downsampled_threshold,
+            self.compressed_voxels.is_some(),
+        )?);
+        Ok(())
+    }
+    fn disable_downsampling(&mut self) {
+        self.downsampling = None;
+    }
+    fn get_downsampled(&mut self) -> Vec<PointI> {
+        let Some(downsampling) = self.downsampling.as_mut() else {
+            return Vec::new();
+        };
+        let compressed = self
+            .compressed_voxels
+            .as_ref()
+            .expect("downsampling needs compress");
+        downsampling.take_changes(|| compressed_pages(&self.zorder, compressed))
+    }
+    fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+        let Some(downsampling) = self.downsampling.as_ref() else {
+            return Vec::new();
+        };
+        let compressed = self
+            .compressed_voxels
+            .as_ref()
+            .expect("downsampling needs compress");
+        downsampling.all(&self.zorder, || compressed_pages(&self.zorder, compressed))
+    }
+    fn clear(&mut self) {
+        self.voxels.clear();
+        if let Some(compressed_voxels) = self.compressed_voxels.as_mut() {
+            compressed_voxels.clear();
+        }
+        self.result.clear();
+        self.maybe_empty.clear();
+        self.clear_downsampled();
+    }
+    fn clear_downsampled(&mut self) {
+        if let Some(downsampling) = self.downsampling.as_mut() {
+            downsampling.reset();
+        }
     }
 }
 
@@ -545,6 +606,7 @@ mod test {
     }
 
     crate::test::shared_tests!(SingleThreaded);
+    crate::test::downsampling_tests!(SingleThreaded);
 
     // ------------------------------------------------------------ constructor
 

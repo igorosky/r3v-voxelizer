@@ -125,6 +125,41 @@ VoxelsUpdate get_all_points(const void *voxelizer);
 /// `voxelizer` is NULL.
 VoxelGroups get_all_points_compressed(const void *voxelizer);
 
+/// Turns downsampling on: one downsampled voxel stands for a cube of
+/// `downsampled_voxel_size`^3 voxels and is present while at least
+/// `downsampled_threshold` of them are constructed. Drops the downsampled
+/// state, the next downsampling call builds it again.
+///
+/// Returns false and changes nothing when `voxelizer` is NULL or was created
+/// without `compress`, `downsampled_voxel_size` is not a power of two in
+/// 2..=128 or `downsampled_threshold` is not in 1..=size^3.
+bool set_downsampling_params(void *voxelizer,
+                             uint8_t downsampled_voxel_size,
+                             uint32_t downsampled_threshold);
+
+/// Turns downsampling off. Does nothing when `voxelizer` is NULL.
+void disable_downsampling(void *voxelizer);
+
+/// Downsampled voxels that changed since the previous call, as 4x4x2 blocks
+/// of downsampled voxels in the format of compress mode `add_points`. Every
+/// present block after the downsampled state got dropped. Free it with
+/// `drop_update`. Empty when `voxelizer` is NULL or downsampling is off.
+VoxelsUpdate get_downsampled(void *voxelizer);
+
+/// Every present downsampled voxel, grouped like `get_all_points_compressed`.
+/// Free it with `drop_voxel_groups`. Empty when `voxelizer` is NULL or
+/// downsampling is off.
+VoxelGroups get_all_downsampled(const void *voxelizer);
+
+/// Removes every voxel of `voxelizer`. Downsampling keeps its params, its
+/// state is dropped. Does nothing when `voxelizer` is NULL.
+void clear_voxelizer(void *voxelizer);
+
+/// Drops the downsampled state of `voxelizer`, keeping the params: the next
+/// `get_downsampled` returns every present block. Does nothing when
+/// `voxelizer` is NULL.
+void clear_downsampled(void *voxelizer);
+
 void drop_update(VoxelsUpdate update);
 
 void drop_voxel_groups(VoxelGroups groups);

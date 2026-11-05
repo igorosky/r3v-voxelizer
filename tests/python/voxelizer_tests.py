@@ -1211,6 +1211,112 @@ def once(fn, *needs):
     return (fn.__name__, fn, False, needs)
 
 
+# ------------------------------------------------------------ downsampling
+
+
+def check_downsampled(voxelizer, *expected):
+    """Compares the decoded get_all_downsampled with (x, y, z, 1) tuples."""
+    got = decode_groups(voxelizer.get_all_downsampled())
+    if got != sorted(expected):
+        fail(f"downsampled voxels differ\n     got: {got}\nexpected: {sorted(expected)}")
+
+
+def downsampling_params_validated(impl):
+    with raises(ValueError):
+        plain(impl).set_downsampling_params(4, 1)
+    v = compressed(impl)
+    for size in (0, 1, 3, 6, 255):
+        with raises(ValueError):
+            v.set_downsampling_params(size, 1)
+    for threshold in (0, 65, U32_MAX):
+        with raises(ValueError):
+            v.set_downsampling_params(4, threshold)
+    for size in (-1, 256):
+        with raises(OverflowError):
+            v.set_downsampling_params(size, 1)
+    with raises(TypeError):
+        v.set_downsampling_params(4.0, 1)
+    v.set_downsampling_params(4, 64)
+    v.set_downsampling_params(downsampled_voxel_size=128, downsampled_threshold=1)
+    # A refused call keeps edge 128: voxel 100 is in D = 0
+    with raises(ValueError):
+        v.set_downsampling_params(3, 1)
+    from_above(v, 100, 0, 0, 1.0)
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1))
+
+
+def downsampling_off_by_default(impl):
+    v = compressed(impl)
+    from_above(v, 5, 6, 7, 1.0)
+    expect_no_voxels(v.get_downsampled())
+    check(v.get_all_downsampled() == [])
+
+
+def downsampling_reports_changes(impl):
+    v = compressed(impl)
+    v.set_downsampling_params(4, 1)
+    expect_no_voxels(v.get_downsampled())
+    from_above(v, 5, 6, 7, 1.0)
+    # D = (1, 1, 1): block (0, 0, 0), bit 1 + 4 + 16
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1 << 21))
+    expect_no_voxels(v.get_downsampled())
+    check_downsampled(v, pi(1, 1, 1, 1))
+    # Destroys (5, 6, 7), constructs (70, 6, 7): D = (17, 1, 1)
+    along_x(v, 5, 70, 6, 7, 1.0)
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 0), block(17, 1, 1, block_bit(17, 1, 1)))
+    check_downsampled(v, pi(17, 1, 1, 1))
+
+
+def downsampling_threshold(impl):
+    # Edge 2: voxels (2, 0, 0) and (3, 1, 1) are both in D = (1, 0, 0)
+    v = compressed(impl)
+    v.set_downsampling_params(2, 2)
+    from_above(v, 2, 0, 0, 1.0)
+    expect_no_voxels(v.get_downsampled())
+    from_above(v, 3, 1, 1, 1.0)
+    expect_voxels(v.get_downsampled(), block(1, 0, 0, block_bit(1, 0, 0)))
+    # Destroys (2, 0, 0), constructs (9, 0, 0) alone in D = (4, 0, 0)
+    along_x(v, 2, 9, 0, 0, 1.0)
+    expect_voxels(v.get_downsampled(), block(1, 0, 0, 0))
+    check_downsampled(v)
+
+
+def downsampling_clear_and_disable(impl):
+    v = compressed(impl)
+    v.set_downsampling_params(4, 1)
+    from_above(v, 0, 0, 0, 1.0)
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1))
+    # Everything again after the state got dropped
+    v.clear_downsampled()
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1))
+    v.disable_downsampling()
+    from_above(v, 4, 0, 0, 1.0)
+    expect_no_voxels(v.get_downsampled())
+    check_downsampled(v)
+    v.set_downsampling_params(4, 1)
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1 | 1 << 1))
+
+
+def clear_removes_everything(impl):
+    v = plain(impl)
+    seed(v, 1.0, 5, 6, 7, 3.0)
+    v.clear()
+    expect_no_voxels(v.get_all_points())
+    expect_voxels(from_above(v, 5, 6, 7, 1.0), pi(5, 6, 7, 1))
+
+    v = compressed(impl)
+    v.set_downsampling_params(4, 1)
+    from_above(v, 5, 6, 7, 1.0)
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1 << 21))
+    v.clear()
+    expect_no_voxels(v.get_all_points())
+    check_constructed(v)
+    expect_no_voxels(v.get_downsampled())
+    # Like a new voxelizer, downsampling still on
+    expect_voxels(from_above(v, 5, 6, 7, 1.0), block(5, 6, 7, block_bit(5, 6, 7)))
+    expect_voxels(v.get_downsampled(), pi(0, 0, 0, 1 << 21))
+
+
 TEST_CASES = [
     once(module_exports_match_features),
     once(classes_belong_to_module),
@@ -1314,6 +1420,12 @@ TEST_CASES = [
     per_impl(get_all_points_compressed_plain_matches_compress_mode),
     per_impl(dump_matches_replayed_results),
     per_impl(scenario_repeatable),
+    per_impl(downsampling_params_validated),
+    per_impl(downsampling_off_by_default),
+    per_impl(downsampling_reports_changes),
+    per_impl(downsampling_threshold),
+    per_impl(downsampling_clear_and_disable),
+    per_impl(clear_removes_everything),
     once(single_and_multi_agree, "single_threaded", "multi_threaded"),
     once(multi_thread_count_zero, "multi_threaded"),
     once(single_and_wgpu_agree, "single_threaded", "wgpu"),
