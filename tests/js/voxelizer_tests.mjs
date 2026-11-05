@@ -91,7 +91,7 @@ function point_i_properties_writable() {
 }
 
 function point_i_setter_wraps() {
-    // Out of range values wrap like any wasm-bindgen integer (see the README).
+    // Out of range values wrap like any wasm-bindgen integer (see docs/bindings.md).
     const point = newPointI(0, 0, 0, 0);
     point.x = 2 ** 31;
     point.y = 1.9;
@@ -128,7 +128,7 @@ function multipliers_properties_writable() {
 }
 
 function multipliers_setter_wraps() {
-    // Out of range values wrap like any wasm-bindgen integer (see the README).
+    // Out of range values wrap like any wasm-bindgen integer (see docs/bindings.md).
     const multipliers = new rv.Multipliers(1.0, 1, 1);
     multipliers.hit = -1;
     multipliers.target = 2 ** 32 + 3.9;
@@ -143,7 +143,7 @@ async function constructors_accept_u32_max(impl) {
 }
 
 async function constructors_wrap_out_of_range(impl) {
-    // A hit multiplier of 2 ** 32 + 3 wraps to 3 (see the README), so this
+    // A hit multiplier of 2 ** 32 + 3 wraps to 3 (see docs/bindings.md), so this
     // is hit_multiplier_scales_hits.
     const v = await make(impl, 1.0, 2 ** 32 + 3, 1, 0, 1, false);
     await seed(v, 1.0, 0, 0, 0, SEED);

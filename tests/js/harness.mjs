@@ -22,8 +22,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const MODULE = "r3v_voxelizer";
 
 /** Directory of the wasm-pack output (`--target web`), as passed in by
- * tests/js_bindings.rs. When run by hand without it, the README's build
- * output (pkg/) is used. */
+ * tests/js_bindings.rs. When run by hand without it, the output of the build
+ * in docs/bindings.md (pkg/) is used. */
 const PKG_DIR =
     process.env.R3V_VOXELIZER_PKG ?? fileURLToPath(new URL("../../pkg", import.meta.url));
 

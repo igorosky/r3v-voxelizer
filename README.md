@@ -1,106 +1,226 @@
+<p align="center">
+  <img src="docs/assets/r3v-logo.svg" alt="r3v" width="300">
+</p>
+
+<h1 align="center">r3v-voxelizer</h1>
+
+<p align="center">
+  Turns point clouds into an occupancy voxel map by ray casting.<br>
+  Rust library with C, C++, Python and JavaScript bindings.
+</p>
+
+<p align="center">
+  <a href="https://github.com/igorosky/r3v-voxelizer/actions/workflows/ci.yml"><img src="https://github.com/igorosky/r3v-voxelizer/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
+---
+
+You give the voxelizer a sensor position and the points it measured. For every
+point it casts a ray from the sensor: the voxel where the ray ends gets more
+occupied, every voxel the ray passes through gets less occupied. Over time
+real obstacles build up and things that moved away disappear.
+
+The voxelizer reports which voxels changed after every call, so a consumer
+(like [r3v-renderer](https://github.com/igorosky/r3v-renderer)) only has to
+update what is new.
+
+## Features
+
+- Three implementations behind one `Voxelizer` trait:
+
+  | Implementation | Cargo feature | Notes |
+  |---|---|---|
+  | `SingleThreaded` | `single_threaded` (default) | Simple, no extra threads |
+  | `MultiThreaded` | `multi_threaded` | Uses a rayon thread pool, not available in JS |
+  | `WgpuAccelerated` | `wgpu` | Compute shader on the GPU (Vulkan, Metal, DX12, WebGPU) |
+
+- Compact output: with `compress` on, changes come as 32 bit occupancy masks
+  of 4x4x2 voxel blocks, ready for r3v-renderer.
+- Whole map dumps, as raw values or as 64x64x64 occupancy groups.
+- Thresholds with hysteresis, a value cap and per call multipliers that can be
+  changed at runtime.
+- Bindings for C, C++, Python and JavaScript (WebAssembly, with the GPU
+  implementation on WebGPU).
+
+## Quick start
+
+Add the crate (it is not on crates.io yet):
+
+```toml
+[dependencies]
+r3v-voxelizer = { git = "https://github.com/igorosky/r3v-voxelizer" }
+# features = ["multi_threaded", "wgpu"] for the other implementations
+```
+
+```rust
+use r3v_voxelizer::geometry::PointF;
+use r3v_voxelizer::{Multipliers, SingleThreaded, Voxelizer, VoxelizerParams};
+
+fn main() {
+    let mut voxelizer = SingleThreaded::new(VoxelizerParams {
+        resolution: 0.1, // voxel edge length, in the units of the points
+        multipliers: Multipliers { intensity: 1.0, hit: 1, target: 2 },
+        destroy_threshold: 0,
+        construct_threshold: 2,
+        max_value: 10,
+        compress: true,
+    });
+
+    let sensor = PointF { x: 0.0, y: 0.0, z: 0.0, i: 1.0 };
+    let points = [PointF { x: 1.0, y: 0.5, z: 0.2, i: 1.0 }];
+
+    // With compress on: one PointI per changed 4x4x2 block,
+    // x, y, z is the block origin and i its occupancy mask.
+    for block in voxelizer.add_points(sensor, &points) {
+        println!("{block:?}");
+    }
+}
+```
+
+`MultiThreaded::new(params, thread_count)` returns a `Result`.
+`WgpuAccelerated::new(params, bucket_count)` is async and returns `None` when
+there is no usable GPU (`pollster::block_on` works fine outside async code).
+
+## Other languages
+
+Build the library with the feature of your language. Add `wgpu` (for example
+`--features c,wgpu`) to get the GPU implementation as well.
+
+| Language | Build | You get |
+|---|---|---|
+| C | `cargo build --release --features c` | `target/release/libr3v_voxelizer.so`, header `bindings/r3v-voxelizer.h` |
+| C++ | `cargo build --release --features cpp` | `target/release/libr3v_voxelizer.so`, header `bindings/r3v-voxelizer.hpp` |
+| Python | `cargo build --release --features python` | `target/release/libr3v_voxelizer.so`, rename it to `r3v_voxelizer.so`; type stubs in `bindings/r3v_voxelizer.pyi` |
+| JavaScript | `wasm-pack build --release --target web --features js` | `pkg/` with the module and TypeScript types |
+
+<details>
+<summary><b>C</b></summary>
+
+```c
+#include "r3v-voxelizer.h"
+
+void *voxelizer = create_single_threaded_voxelizer(
+    0.1f, 1.0f, 1, 2, 0, 2, 10, true);  /* resolution, multipliers, thresholds, max_value, compress */
+
+PointF sensor = {0.0f, 0.0f, 0.0f, 1.0f};
+PointF points[] = {{1.0f, 0.5f, 0.2f, 1.0f}};
+VoxelsUpdate update = add_points(voxelizer, sensor, points, 1);
+for (size_t k = 0; k < update.len; k++) {
+    /* update.data[k].x, .y, .z, .i */
+}
+drop_update(update);
+drop_voxelizer(voxelizer);
+```
+
+Link with `-lr3v_voxelizer`. Every function accepts NULL.
+</details>
+
+<details>
+<summary><b>C++</b></summary>
+
+```cpp
+#include "r3v-voxelizer.hpp"
+namespace rv = r3v::voxelizer;
+
+void *voxelizer = rv::create_single_threaded_voxelizer(0.1f, 1.0f, 1, 2, 0, 2, 10, true);
+rv::PointF sensor{0.0f, 0.0f, 0.0f, 1.0f};
+rv::PointF point{1.0f, 0.5f, 0.2f, 1.0f};
+rv::VoxelsUpdate update = rv::add_points(voxelizer, sensor, &point, 1);
+std::vector<rv::PointI> blocks(update.data, update.data + update.len);
+rv::drop_update(update);
+rv::drop_voxelizer(voxelizer);
+```
+</details>
+
+<details>
+<summary><b>Python</b></summary>
+
+```python
+import r3v_voxelizer as rv
+
+voxelizer = rv.SingleThreaded(
+    resolution=0.1, intensity_multiplier=1.0, hit_multiplier=1, target_multiplier=2,
+    destroy_threshold=0, construct_threshold=2, max_value=10, compress=True)
+
+update = voxelizer.add_points(rv.PointF(0.0, 0.0, 0.0, 1.0), [rv.PointF(1.0, 0.5, 0.2, 1.0)])
+for block in update:
+    print(block.x(), block.y(), block.z(), block.i())
+```
+</details>
+
+<details>
+<summary><b>JavaScript</b></summary>
+
+```js
+import init, * as rv from "./pkg/r3v_voxelizer.js";
+
+await init();
+const voxelizer = new rv.SingleThreaded(0.1, 1.0, 1, 2, 0, 2, 10, true);
+const update = voxelizer.add_points(
+  new rv.PointF(0, 0, 0, 1),
+  [{ x: 1.0, y: 0.5, z: 0.2, i: 1.0 }],  // PointF or plain objects
+);
+voxelizer.free();
+
+// GPU version, everything is async there:
+const gpu = await rv.WgpuAccelerated.create(0.1, 1.0, 1, 2, 0, 2, 10, true, 4096);
+const gpuUpdate = await gpu.add_points(new rv.PointF(0, 0, 0, 1), [{ x: 1, y: 0.5, z: 0.2, i: 1 }]);
+```
+</details>
+
+More about each binding (GPU setup, freeing memory, async rules in JS) is in
+[docs/bindings.md](docs/bindings.md).
+
 ## Parameters
 
-Every voxelizer takes `resolution`, `intensity_multiplier`, `hit_multiplier`, `target_multiplier`, `destroy_threshold`, `construct_threshold`, `max_value` and `compress`, in this order (in Rust as a `VoxelizerParams` struct, holding the three multipliers as a `Multipliers` struct of `intensity`, `hit` and `target`). `intensity_multiplier` scales the intensity of every point before it is truncated to an integer, so a point of intensity `i` adds `trunc(i * intensity_multiplier) * target_multiplier` to the voxel it ends in and subtracts `trunc(i * intensity_multiplier) * hit_multiplier` from every voxel its ray passes through (negative products count as 0). Pass `1.0` to leave intensities as they are. `max_value` caps voxel values: a voxel seen many times saturates at it instead of growing without bound, so as many hits as `max_value` (divided by `hit_multiplier`) always clear it again. Pass `4294967295` (`u32::MAX`) for no cap. With `compress` a voxel gets constructed when it reaches `construct_threshold` and destroyed when, being constructed, it drops to `destroy_threshold` or below. Between the thresholds a voxel keeps its state, so one that never reached `construct_threshold` is never destroyed. With `compress` a `max_value` below `construct_threshold` means no voxel ever gets constructed.
+Every voxelizer is created with the same parameters (in this order outside
+Rust):
 
-The multipliers can be changed after a voxelizer is created: `set_multipliers` takes a `Multipliers` (`intensity`, `hit`, `target`) used by the following `add_points` calls, voxels keep the values they got so far. `get_multipliers` returns a copy of the current ones (`multipliers()` in Rust, both are methods of the `Voxelizer` trait there). In C/C++ they are `set_multipliers(voxelizer, multipliers)` and `get_multipliers(voxelizer)`, the latter returns all 0 for NULL. In Python and JS `Multipliers` is a class like `PointF` and both are methods of every voxelizer class. The JS `WgpuAccelerated` throws from both while another call (`add_points` or a dump) is running.
+| Parameter | Meaning |
+|---|---|
+| `resolution` | Voxel edge length. Point coordinates are divided by it. |
+| `intensity_multiplier` | Scales the intensity of each point before it is truncated to an integer. `1.0` keeps it. |
+| `hit_multiplier` | Taken from every voxel a ray passes through, times the point intensity. |
+| `target_multiplier` | Added to the voxel a ray ends in, times the point intensity. |
+| `destroy_threshold` | A constructed voxel is destroyed at or below this value. |
+| `construct_threshold` | A voxel is constructed when it reaches this value. |
+| `max_value` | Voxel values stop growing here. `4294967295` (`u32::MAX`) means no cap. |
+| `compress` | Report changes as 4x4x2 block masks instead of voxel values. |
 
-The whole state of a voxelizer can be dumped. `get_all_points` returns every voxel that is not 0 with its value, as `PointI`s (also with `compress`). `get_all_points_compressed` returns every constructed voxel, as groups of 64x64x64 voxels holding at least one: the group key (voxel coordinates shifted right by 6, `i` is 0) and 4096 (`POINTS_IN_VOXEL_GROUP`) 64 bit words, one per 4x4x4 fine page in z-order (bits of the page offset in the group interleaved x, y, z from the lowest one). Bit `x + 4 * y + 16 * z` of a word is set when voxel (x, y, z) of its page is constructed. Without `compress` a voxel counts as constructed once it reaches `construct_threshold`. Both are methods of the `Voxelizer` trait in Rust and of every voxelizer class in Python and JS, where a group is a `CompressedVoxelGroup` (`point` and `values`, methods in Python, properties in JS where `values` is a `BigUint64Array`). In C/C++ `get_all_points(voxelizer)` returns a `VoxelsUpdate` to free with `drop_update` and `get_all_points_compressed(voxelizer)` returns `VoxelGroups`, an array of `VoxelGroup` (`point` and `values[POINTS_IN_VOXEL_GROUP]`) to free with `drop_voxel_groups`, both empty for NULL. The JS `WgpuAccelerated` returns Promises from both, which reject while another call is running.
+The full description, with what `add_points` returns and how to dump the map,
+is in [docs/parameters.md](docs/parameters.md).
 
-## C/C++
+## Documentation
 
-To compile and run the C/C++ code, you can use the following commands in your terminal:
-```bash
-cargo build --release --features c     # For C
-cargo build --release --features cpp   # For C++
-```
+| Document | What is inside |
+|---|---|
+| [docs/parameters.md](docs/parameters.md) | Parameters, output formats, multipliers, map dumps |
+| [docs/bindings.md](docs/bindings.md) | C, C++, Python and JavaScript details |
+| [docs/benchmarks.md](docs/benchmarks.md) | `bench.sh`, the quick check for optimization work, flamegraphs |
 
-The compiled `.so` files will be located in the `target/release` directory.
-The headers for the C/C++ code can be found in the `bindings` directory.
-
-The GPU voxelizer needs the `wgpu` feature as well (e.g. `--features c,wgpu`). `create_wgpu_voxelizer` takes the usual arguments plus `bucket_count`, the size of its hashmap: each bucket holds 2 pages of 4x4x4 voxels and takes about 1 KiB of GPU memory (`wgpu_memory_size(bucket_count)` gives the exact size in bytes). It returns NULL when there is no GPU adapter capable of running compute shaders, `bucket_count` is 0 or the hashmap does not fit the adapter's limits. Without the `wgpu` feature it always returns NULL.
-
-## Python
-
-To run the Python code, you can use the following command in your terminal:
-```bash
-cargo build --release --features python
-```
-
-Then you can use the generated `.so` file in your Python code by importing it as a module.
-
-With `--features python,wgpu` the module also has `WgpuAccelerated`, the GPU voxelizer. Its constructor takes the usual arguments plus `bucket_count` (see C/C++ above, `WgpuAccelerated.memory_size(bucket_count)` gives the GPU memory it takes) and raises `RuntimeError` when no GPU voxelizer can be created.
-
-Type stubs for type checkers and IDEs are in `bindings/r3v_voxelizer.pyi`, put the file next to the module's `.so` file. They describe the module built with every voxelizer feature, the classes of features left out are missing at runtime.
-
-## JavaScript
-
-To build the JavaScript code it is recommended to use `wasm-pack`. You can install it using the following command:
-```bash
-cargo install wasm-pack
-```
-
-then you can build the JavaScript code using the following command:
-```bash
-wasm-pack build --release --target web --features=js
-```
-
-The build also generates the TypeScript types (`r3v_voxelizer.d.ts`).
-
-Integer arguments (the voxelizer constructor parameters) and the `PointI` fields are converted the way wasm-bindgen converts every integer: out of range or fractional values are wrapped and truncated instead of rejected. For example `-1` passed as an unsigned value becomes `4294967295` and `1.9` becomes `1`.
-
-Multi-threaded voxelizer is not supported in the JavaScript build.
-
-With `--features=js,wgpu` the module also has `WgpuAccelerated`, the GPU voxelizer running on WebGPU. Talking to the GPU is asynchronous on the web, so it has no constructor:
-```js
-const voxelizer = await WgpuAccelerated.create(resolution, intensityMultiplier, hitMultiplier,
-    targetMultiplier, destroyThreshold, constructThreshold, maxValue, compress, bucketCount);
-const update = await voxelizer.add_points(sensor, points);
-```
-`create` rejects when there is no WebGPU adapter capable of running compute shaders, `bucketCount` is 0 or the hashmap does not fit the adapter's limits (see C/C++ above for `bucketCount`, `WgpuAccelerated.memory_size(bucketCount)` gives the GPU memory it takes). `get_all_points` and `get_all_points_compressed` return Promises as well. Await each of these calls before starting the next one: a call made while another one is running rejects.
-
-The JS tests of the `wgpu` feature run on Node.js, which has no WebGPU, so they use the `webgpu` package (Dawn). Install it with `npm ci` in `tests/js`.
-
-## Benchmarks
-
-`./bench.sh` runs every implementation (`SingleThreaded`, `MultiThreaded` at several thread counts and `WgpuAccelerated`) on the same generated workloads and writes the results to `target/bench/<date>/`: `results.csv`, `run.log` and, when docker is available, plots of the CSV (`benches/plot.py`). `./bench.sh --quick` runs a smaller sweep, `./bench.sh --help` lists the options (implementations, thread counts, points per frame, ranges, `compress`, frame counts, ...) and `--no-plot` skips the plots.
-
-Two scenarios are generated: `room`, a sensor circling inside a box room with rays in every direction, and `cone`, a static sensor whose rays all end on a small patch of a wall (many rays hitting the same voxels). The `match` column tells whether an implementation returned the same voxels as the first one run on the workload. A run that panics is reported as such and the sweep goes on.
-
-`FEATURES` picks the implementations built (default `single_threaded,multi_threaded,wgpu`), e.g. `FEATURES=single_threaded,multi_threaded ./bench.sh` on a machine without a GPU. The benchmark itself is `benches/voxelizer.rs`, also runnable with `cargo bench --features multi_threaded,wgpu --bench voxelizer -- <options>`.
-
-### Quick check while optimizing
-
-`./bench.sh --check` runs a fixed set of four cases (`compress` on) on every implementation for about a minute and compares the run with a saved baseline and with the previous run. Save the baseline before changing anything, then run the check after every change:
+## Development
 
 ```bash
-./bench.sh --check --save-baseline   # on the code you start from
-./bench.sh --check                   # after a change
-./bench.sh --check --impls st        # only the implementation you work on
+./test.sh                 # clippy (warnings are errors) and tests, every group
+./test.sh core            # one group: core, c, python or js
+cargo fmt --all --check
 ```
 
-Per case it prints the median `ms/frame` over the reps, `±` (median absolute deviation of the reps), and the change against the baseline and the previous run: `faster` or `slower` only when the change is larger than `--threshold` (5% by default) and twice the `±` of both runs, `~` otherwise. `output` is `CHANGED` when the voxels returned differ from the baseline, which an optimization should never do. A summary line per implementation gives the geometric mean over the cases.
+- The GPU tests need a Vulkan device. The software driver lavapipe
+  (`mesa-vulkan-drivers`) is enough.
+- `c` needs a C and C++ compiler, `python` needs `python3`, `js` needs
+  `wasm-pack`, the `wasm32-unknown-unknown` target, Node and `npm ci` in
+  `tests/js`.
+- Builds with `c` or `cpp` regenerate the headers in `bindings/`. Commit them,
+  CI checks they are up to date.
+- `python`, `js` and `c`/`cpp` cannot be combined in one build, and `js` does
+  not work with `multi_threaded`.
 
-Runs are written to `target/bench/check/runs/`, the baseline to `target/bench/check/baseline.csv`. Compare runs of the same machine and the same `--impls` only. On laptops the numbers depend a lot on the power profile and on other programs: use a performance profile and close heavy programs. On CPUs with performance and efficiency cores, `st` and the host side of `wgpu` are pinned to one performance core (`--pin` changes or disables it), `mt` runs on every CPU. `wgpu` timings are noisier than the CPU ones, its bands are wider. `./bench.sh --check --help` lists the options.
+## Part of r3v
 
-The check is built with the `bench-check` profile (`Cargo.toml`): release with `debug = "line-tables-only"`, so a profiler such as `perf` maps samples to source lines. The binary is in `target/bench-check/deps/check-*`, apart from the other benches.
-
-### Flamegraphs
-
-`--flamegraph` runs the benchmark (with `--check` the check) through [`cargo flamegraph`](https://github.com/flamegraph-rs/flamegraph) (`cargo install flamegraph`, needs `perf`):
-
-```bash
-./bench.sh --check --flamegraph --impls st
-```
-
-It builds the `bench-check` profile with `RUSTFLAGS="-C force-frame-pointers=yes"` in `target/flamegraph/`, so the other builds are kept, and perf walks the call stacks through the frame pointers. The flamegraph is written to `target/bench/flamegraph/<date>-<benchmark>.svg`. Next to it, `<date>-<benchmark>.txt` lists every function sorted by CPU time, and the top of the list is printed:
-
-```
-12.138 s of CPU time, summed over every thread
-
-            total              self  function
- 94.67%   11.491 s  18.29%    2.221 s  <SingleThreaded as Voxelizer>::add_points
- 73.05%    8.867 s  66.79%    8.107 s  <SingleThreaded>::hit_voxel
-  8.98%    1.090 s   8.98%    1.090 s  bmi2::index_of_unchecked::<u16, 3>
-```
-
-`total` is the time with the functions called (counted once per stack, so recursion does not count twice), `self` the time in the function itself, both summed over every thread. Inlined functions are listed on their own. Names are shortened to the type, or the last module of a free function, generic arguments stay. `benches/hotspots.awk` makes the table from the folded stacks of the latest run, `target/flamegraph/stacks.folded`; the perf data of the latest run is `target/flamegraph/perf.data` (`perf report -i target/flamegraph/perf.data`). Frame pointers and perf slow the run down a little, so a profiled check run is not saved (`--no-save`) and its comparisons are only a hint. Profile one implementation at a time. perf samples every running thread at 997 Hz, and cargo flamegraph keeps the whole `perf script` output in memory (a few KB per sample), so with `mt` the frequency is divided by its thread count (`--threads`, every CPU by default): about 997 samples a second whatever the implementation. perf needs `kernel.perf_event_paranoid` at 2 or lower (Ubuntu sets 4): `sudo sysctl kernel.perf_event_paranoid=2`.
+| Repository | What it does |
+|---|---|
+| **r3v-voxelizer** | Point clouds to occupancy voxel map (this repository) |
+| [r3v-renderer](https://github.com/igorosky/r3v-renderer) | Headless renderer for the voxel map and robot models |
+| [r3v-ros](https://github.com/igorosky/r3v-ros) | ROS 2 nodes that put both together and publish images |
+| [r3v-web](https://github.com/igorosky/r3v-web) | Browser viewer for the rendered stream |

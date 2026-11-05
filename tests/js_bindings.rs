@@ -1,7 +1,7 @@
 //! Runs the JavaScript test suite in `tests/js` against the JS bindings.
 //!
 //! The host cdylib of this test run is of no use to JavaScript, so the crate
-//! is built for `wasm32-unknown-unknown` with wasm-pack (the build the README
+//! is built for `wasm32-unknown-unknown` with wasm-pack (the build docs/bindings.md
 //! documents: `--target web`), with `js` and the voxelizer features of this
 //! test run. Every JS test case runs in its own Node.js process, so a trap
 //! (e.g. a Rust panic) fails only that case.
