@@ -48,9 +48,10 @@ The benchmark itself is `benches/voxelizer.rs`, also runnable with
 
 ## Quick check while optimizing
 
-`./bench.sh --check` runs a fixed set of four cases (`compress` on) on every
+`./bench.sh --check` runs a fixed set of six cases (`compress` on) on every
 implementation in about a minute. It compares the run with a saved baseline
-and with the previous run.
+and with the previous run. The `-ds` cases call `get_downsampled` after every
+`add_points` and time both.
 
 ```bash
 ./bench.sh --check --save-baseline   # once, on the code you start from

@@ -143,6 +143,43 @@ mod st {
         pub fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
             self.0.get_all_points_compressed()
         }
+        /// Turns downsampling on: one downsampled voxel stands for a cube of
+        /// `downsampled_voxel_size` ** 3 voxels and is present while at
+        /// least `downsampled_threshold` of them are constructed. Throws
+        /// without `compress`, for a size that is not a power of two in
+        /// 2..=128 or a threshold not in 1..=size ** 3.
+        pub fn set_downsampling_params(
+            &mut self,
+            downsampled_voxel_size: u8,
+            downsampled_threshold: u32,
+        ) -> Result<(), JsError> {
+            self.0
+                .set_downsampling_params(downsampled_voxel_size, downsampled_threshold)
+                .map_err(|err| JsError::new(&err.to_string()))
+        }
+        /// Turns downsampling off.
+        pub fn disable_downsampling(&mut self) {
+            self.0.disable_downsampling();
+        }
+        /// Downsampled voxels that changed since the previous call, as 4x4x2
+        /// blocks of downsampled voxels like compress mode `add_points`.
+        pub fn get_downsampled(&mut self) -> Vec<PointI> {
+            self.0.get_downsampled()
+        }
+        /// Every present downsampled voxel, grouped like
+        /// `get_all_points_compressed`.
+        pub fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_downsampled()
+        }
+        /// Removes every voxel, downsampling keeps its params.
+        pub fn clear(&mut self) {
+            self.0.clear();
+        }
+        /// Drops the downsampled state, the next `get_downsampled` returns
+        /// every present block.
+        pub fn clear_downsampled(&mut self) {
+            self.0.clear_downsampled();
+        }
     }
 }
 
@@ -266,6 +303,61 @@ mod gpu {
             let groups = voxelizer.get_all_points_compressed_async().await;
             self.0.set(Some(voxelizer));
             Ok(groups)
+        }
+        /// Turns downsampling on, see `SingleThreaded.set_downsampling_params`.
+        /// Throws for params it does not take and while another call is
+        /// running.
+        pub fn set_downsampling_params(
+            &self,
+            downsampled_voxel_size: u8,
+            downsampled_threshold: u32,
+        ) -> Result<(), JsError> {
+            let mut voxelizer = self.take("set_downsampling_params")?;
+            let result =
+                voxelizer.set_downsampling_params(downsampled_voxel_size, downsampled_threshold);
+            self.0.set(Some(voxelizer));
+            result.map_err(|err| JsError::new(&err.to_string()))
+        }
+        /// Turns downsampling off. Throws while another call is running.
+        pub fn disable_downsampling(&self) -> Result<(), JsError> {
+            let mut voxelizer = self.take("disable_downsampling")?;
+            voxelizer.disable_downsampling();
+            self.0.set(Some(voxelizer));
+            Ok(())
+        }
+        /// Downsampled voxels that changed since the previous call, as 4x4x2
+        /// blocks of downsampled voxels like compress mode `add_points`.
+        /// Rejects while another call is running.
+        pub async fn get_downsampled(&self) -> Result<Vec<PointI>, JsError> {
+            let mut voxelizer = self.take("get_downsampled")?;
+            let blocks = voxelizer.get_downsampled_async().await;
+            self.0.set(Some(voxelizer));
+            Ok(blocks)
+        }
+        /// Every present downsampled voxel, grouped like
+        /// `get_all_points_compressed`. Rejects while another call is
+        /// running.
+        pub async fn get_all_downsampled(&self) -> Result<Vec<CompressedVoxelGroup>, JsError> {
+            let voxelizer = self.take("get_all_downsampled")?;
+            let groups = voxelizer.get_all_downsampled_async().await;
+            self.0.set(Some(voxelizer));
+            Ok(groups)
+        }
+        /// Removes every voxel, downsampling keeps its params. Throws while
+        /// another call is running.
+        pub fn clear(&self) -> Result<(), JsError> {
+            let mut voxelizer = self.take("clear")?;
+            voxelizer.clear();
+            self.0.set(Some(voxelizer));
+            Ok(())
+        }
+        /// Drops the downsampled state, the next `get_downsampled` returns
+        /// every present block. Throws while another call is running.
+        pub fn clear_downsampled(&self) -> Result<(), JsError> {
+            let mut voxelizer = self.take("clear_downsampled")?;
+            voxelizer.clear_downsampled();
+            self.0.set(Some(voxelizer));
+            Ok(())
         }
         /// GPU memory taken by the hashmap of `bucket_count` buckets, in
         /// bytes. Exact as a number, it stays below 2 ** 53.

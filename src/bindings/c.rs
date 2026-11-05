@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 
 use crate::{
-    Multipliers, POINTS_IN_VOXEL_GROUP, Voxelizer,
+    CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP, Voxelizer,
     geometry::{PointF, PointI},
 };
 
@@ -28,6 +28,64 @@ pub struct VoxelGroup {
 pub struct VoxelGroups {
     data: *mut VoxelGroup,
     len: usize,
+}
+
+impl VoxelsUpdate {
+    const EMPTY: Self = Self {
+        data: core::ptr::null_mut(),
+        len: 0,
+    };
+
+    /// Hands `points` over to C, freed by `drop_update`.
+    fn from_points(points: Vec<PointI>) -> Self {
+        let mut points = points.into_boxed_slice();
+        let len = points.len();
+        let data = points.as_mut_ptr();
+        std::mem::forget(points);
+        Self { data, len }
+    }
+}
+
+impl VoxelGroups {
+    const EMPTY: Self = Self {
+        data: core::ptr::null_mut(),
+        len: 0,
+    };
+
+    /// Hands `groups` over to C, freed by `drop_voxel_groups`.
+    fn from_groups(groups: Vec<CompressedVoxelGroup>) -> Self {
+        let mut groups: Box<[VoxelGroup]> = groups
+            .into_iter()
+            .map(|group| VoxelGroup {
+                point: group.point,
+                values: *group.values,
+            })
+            .collect();
+        let len = groups.len();
+        let data = groups.as_mut_ptr();
+        std::mem::forget(groups);
+        Self { data, len }
+    }
+}
+
+/// The voxelizer behind a handle of `create_*_voxelizer`, `None` for NULL.
+///
+/// # Safety
+///
+/// `voxelizer` is NULL or a live handle, not used elsewhere meanwhile.
+unsafe fn voxelizer_mut<'a>(voxelizer: *mut c_void) -> Option<&'a mut dyn Voxelizer> {
+    // SAFETY: see above
+    unsafe { (voxelizer as *mut Box<dyn Voxelizer>).as_mut() }.map(|voxelizer| &mut **voxelizer)
+}
+
+/// [`voxelizer_mut`] for reading.
+///
+/// # Safety
+///
+/// `voxelizer` is NULL or a live handle, not changed meanwhile.
+unsafe fn voxelizer_ref<'a>(voxelizer: *const c_void) -> Option<&'a dyn Voxelizer> {
+    // SAFETY: see above
+    unsafe { (voxelizer as *const Box<dyn Voxelizer>).as_ref() }.map(|voxelizer| &**voxelizer)
 }
 
 #[cfg(any(
@@ -234,18 +292,10 @@ pub extern "C" fn get_multipliers(voxelizer: *const c_void) -> Multipliers {
 /// `drop_update`. Empty when `voxelizer` is NULL.
 #[unsafe(no_mangle)]
 pub extern "C" fn get_all_points(voxelizer: *const c_void) -> VoxelsUpdate {
-    if voxelizer.is_null() {
-        return VoxelsUpdate {
-            data: core::ptr::null_mut(),
-            len: 0,
-        };
+    match unsafe { voxelizer_ref(voxelizer) } {
+        Some(voxelizer) => VoxelsUpdate::from_points(voxelizer.get_all_points()),
+        None => VoxelsUpdate::EMPTY,
     }
-    let voxelizer = unsafe { &*(voxelizer as *const Box<dyn Voxelizer>) };
-    let mut result = voxelizer.get_all_points().into_boxed_slice();
-    let len = result.len();
-    let data = result.as_mut_ptr();
-    std::mem::forget(result);
-    VoxelsUpdate { data, len }
 }
 
 /// Every constructed voxel of `voxelizer`, as groups holding at least one.
@@ -254,25 +304,81 @@ pub extern "C" fn get_all_points(voxelizer: *const c_void) -> VoxelsUpdate {
 /// `voxelizer` is NULL.
 #[unsafe(no_mangle)]
 pub extern "C" fn get_all_points_compressed(voxelizer: *const c_void) -> VoxelGroups {
-    if voxelizer.is_null() {
-        return VoxelGroups {
-            data: core::ptr::null_mut(),
-            len: 0,
-        };
+    match unsafe { voxelizer_ref(voxelizer) } {
+        Some(voxelizer) => VoxelGroups::from_groups(voxelizer.get_all_points_compressed()),
+        None => VoxelGroups::EMPTY,
     }
-    let voxelizer = unsafe { &*(voxelizer as *const Box<dyn Voxelizer>) };
-    let mut result: Box<[VoxelGroup]> = voxelizer
-        .get_all_points_compressed()
-        .into_iter()
-        .map(|group| VoxelGroup {
-            point: group.point,
-            values: *group.values,
-        })
-        .collect();
-    let len = result.len();
-    let data = result.as_mut_ptr();
-    std::mem::forget(result);
-    VoxelGroups { data, len }
+}
+
+/// Turns downsampling on: one downsampled voxel stands for a cube of
+/// `downsampled_voxel_size`^3 voxels and is present while at least
+/// `downsampled_threshold` of them are constructed. Drops the downsampled
+/// state, the next downsampling call builds it again.
+///
+/// Returns false and changes nothing when `voxelizer` is NULL or was created
+/// without `compress`, `downsampled_voxel_size` is not a power of two in
+/// 2..=128 or `downsampled_threshold` is not in 1..=size^3.
+#[unsafe(no_mangle)]
+pub extern "C" fn set_downsampling_params(
+    voxelizer: *mut c_void,
+    downsampled_voxel_size: u8,
+    downsampled_threshold: u32,
+) -> bool {
+    unsafe { voxelizer_mut(voxelizer) }.is_some_and(|voxelizer| {
+        voxelizer
+            .set_downsampling_params(downsampled_voxel_size, downsampled_threshold)
+            .is_ok()
+    })
+}
+
+/// Turns downsampling off. Does nothing when `voxelizer` is NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn disable_downsampling(voxelizer: *mut c_void) {
+    if let Some(voxelizer) = unsafe { voxelizer_mut(voxelizer) } {
+        voxelizer.disable_downsampling();
+    }
+}
+
+/// Downsampled voxels that changed since the previous call, as 4x4x2 blocks
+/// of downsampled voxels in the format of compress mode `add_points`. Every
+/// present block after the downsampled state got dropped. Free it with
+/// `drop_update`. Empty when `voxelizer` is NULL or downsampling is off.
+#[unsafe(no_mangle)]
+pub extern "C" fn get_downsampled(voxelizer: *mut c_void) -> VoxelsUpdate {
+    match unsafe { voxelizer_mut(voxelizer) } {
+        Some(voxelizer) => VoxelsUpdate::from_points(voxelizer.get_downsampled()),
+        None => VoxelsUpdate::EMPTY,
+    }
+}
+
+/// Every present downsampled voxel, grouped like `get_all_points_compressed`.
+/// Free it with `drop_voxel_groups`. Empty when `voxelizer` is NULL or
+/// downsampling is off.
+#[unsafe(no_mangle)]
+pub extern "C" fn get_all_downsampled(voxelizer: *const c_void) -> VoxelGroups {
+    match unsafe { voxelizer_ref(voxelizer) } {
+        Some(voxelizer) => VoxelGroups::from_groups(voxelizer.get_all_downsampled()),
+        None => VoxelGroups::EMPTY,
+    }
+}
+
+/// Removes every voxel of `voxelizer`. Downsampling keeps its params, its
+/// state is dropped. Does nothing when `voxelizer` is NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn clear_voxelizer(voxelizer: *mut c_void) {
+    if let Some(voxelizer) = unsafe { voxelizer_mut(voxelizer) } {
+        voxelizer.clear();
+    }
+}
+
+/// Drops the downsampled state of `voxelizer`, keeping the params: the next
+/// `get_downsampled` returns every present block. Does nothing when
+/// `voxelizer` is NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn clear_downsampled(voxelizer: *mut c_void) {
+    if let Some(voxelizer) = unsafe { voxelizer_mut(voxelizer) } {
+        voxelizer.clear_downsampled();
+    }
 }
 
 #[unsafe(no_mangle)]

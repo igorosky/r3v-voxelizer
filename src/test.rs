@@ -15,8 +15,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
-    Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, DownsamplingError, Multipliers,
+    POINTS_IN_VOXEL_GROUP, Voxelizer, VoxelizerParams,
     geometry::{PointF, PointI, ZOrder},
 };
 
@@ -282,19 +282,24 @@ pub(crate) fn along_x<T: TestVoxelizer>(
 /// 50 (intensities 1..=5), call 2 a cube of size 100 (intensities 1..=3)
 /// whose rays cross call 1 targets. Returns the sorted result of every call.
 pub(crate) fn workload<T: TestVoxelizer>(v: &mut T) -> Vec<Vec<PointI>> {
-    let sensor = pf(0.5, 0.5, 0.5, 1.0);
+    workload_points()
+        .into_iter()
+        .map(|points| sorted(v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points)))
+        .collect()
+}
+/// Points of the calls of [`workload`], the sensor is at the origin.
+pub(crate) fn workload_points() -> Vec<Vec<PointF>> {
     [(50, 20, 4, 5), (100, 40, 8, 3)]
         .into_iter()
         .map(|(dist, half, step, max_i)| {
-            let points: Vec<PointF> = cube_faces(dist, half, step)
+            cube_faces(dist, half, step)
                 .into_iter()
                 .enumerate()
                 .map(|(k, (x, y, z))| {
                     let i = 1 + k as u32 % max_i;
                     pf(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, i as f32)
                 })
-                .collect();
-            sorted(v.add_points(sensor.clone(), &points))
+                .collect()
         })
         .collect()
 }
@@ -341,6 +346,128 @@ pub(crate) fn decode_groups(groups: &[CompressedVoxelGroup]) -> Vec<PointI> {
         }
     }
     sorted(out)
+}
+
+// --------------------------------------------------- downsampling helpers
+//
+// Downsampled voxel D of voxel v is v >> log2(size). get_downsampled
+// reports 4x4x2 blocks of downsampled voxels in the compress mode format,
+// get_all_downsampled groups of 64x64x64 downsampled voxels.
+
+/// Hits off, so that rays change nothing on the way, see [`construct`].
+const CONSTRUCTING: Multipliers = Multipliers {
+    intensity: 1.0,
+    hit: 0,
+    target: 1,
+};
+/// Targets off, see [`destroy`].
+const DESTROYING: Multipliers = Multipliers {
+    intensity: 1.0,
+    hit: 1,
+    target: 0,
+};
+
+/// [`compressed`] (constructed at 1, destroyed at 0) with downsampling on.
+pub(crate) fn downsampled<T: TestVoxelizer>(size: u8, threshold: u32) -> T {
+    let mut v = compressed::<T>();
+    v.set_downsampling_params(size, threshold)
+        .expect("valid downsampling params");
+    v
+}
+/// Adds 1 to every voxel of `coords` in one call without hitting anything,
+/// which constructs the ones at 0 in a [`compressed`] voxelizer.
+pub(crate) fn construct<T: TestVoxelizer>(v: &mut T, coords: &[Coord]) {
+    let multipliers = v.multipliers();
+    v.set_multipliers(CONSTRUCTING);
+    let points: Vec<_> = coords
+        .iter()
+        .map(|&(x, y, z)| pf(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5, 1.0))
+        .collect();
+    v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+    v.set_multipliers(multipliers);
+}
+/// Drops every voxel of `coords` to 0, one call each: a ray from the voxel
+/// to its neighbour hits only the voxel.
+pub(crate) fn destroy<T: TestVoxelizer>(v: &mut T, coords: &[Coord]) {
+    let multipliers = v.multipliers();
+    v.set_multipliers(DESTROYING);
+    for &(x, y, z) in coords {
+        along_x(v, x, x + 1, y, z, 1000.0);
+    }
+    v.set_multipliers(multipliers);
+}
+/// Expected [`Voxelizer::get_downsampled`] block of the downsampled voxel
+/// `d` alone.
+pub(crate) fn ds_block((x, y, z): Coord) -> PointI {
+    block(x, y, z, block_bit(x, y, z))
+}
+/// Every downsampled voxel set in `blocks`, with `i = 1`, sorted.
+pub(crate) fn decode_blocks(blocks: &[PointI]) -> Vec<PointI> {
+    let mut out = Vec::new();
+    for b in blocks {
+        for bit in (0..32).filter(|bit| b.i & (1 << bit) != 0) {
+            out.push(pi(
+                b.x + (bit & 3),
+                b.y + ((bit >> 2) & 3),
+                b.z + (bit >> 4),
+                1,
+            ));
+        }
+    }
+    sorted(out)
+}
+/// Downsampled voxels present after applying the reports of
+/// [`Voxelizer::get_downsampled`] in `results` in order, with `i = 1`, sorted.
+/// Also checks that every report is on the block grid and lists a block once.
+pub(crate) fn replay_blocks(results: &[Vec<PointI>]) -> Vec<PointI> {
+    let mut blocks = BTreeMap::new();
+    for result in results {
+        let origins: Vec<_> = sorted(result.iter().map(|b| (b.x, b.y, b.z)).collect());
+        assert!(origins.windows(2).all(|w| w[0] != w[1]), "{result:?}");
+        for b in result {
+            assert_eq!(block_of(b.x, b.y, b.z), (b.x, b.y, b.z), "{b:?}");
+            blocks.insert((b.x, b.y, b.z), b.i);
+        }
+    }
+    let blocks: Vec<_> = blocks
+        .into_iter()
+        .filter(|(_, i)| *i != 0)
+        .map(|((x, y, z), i)| pi(x, y, z, i))
+        .collect();
+    decode_blocks(&blocks)
+}
+/// Downsampled voxels of edge `size` holding at least `threshold`
+/// constructed voxels of `v`, with `i = 1`, sorted. Computed from
+/// [`Voxelizer::get_all_points_compressed`].
+pub(crate) fn reference_downsampled<T: TestVoxelizer>(
+    v: &T,
+    size: u8,
+    threshold: u32,
+) -> Vec<PointI> {
+    let shift = size.trailing_zeros();
+    let mut counts = BTreeMap::new();
+    for p in decode_groups(&v.get_all_points_compressed()) {
+        *counts
+            .entry((p.x >> shift, p.y >> shift, p.z >> shift))
+            .or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count >= threshold)
+        .map(|((x, y, z), _)| pi(x, y, z, 1))
+        .collect()
+}
+/// [`Voxelizer::get_all_downsampled`] decoded, also checks that its groups
+/// are unique and not empty.
+pub(crate) fn all_downsampled<T: TestVoxelizer>(v: &T) -> Vec<PointI> {
+    let groups = sorted_groups(v.get_all_downsampled());
+    assert!(groups.windows(2).all(|w| w[0].point != w[1].point));
+    assert!(
+        groups
+            .iter()
+            .all(|g| g.point.i == 0 && g.values.iter().any(|w| *w != 0))
+    );
+    decode_groups(&groups)
 }
 
 // --------------------------------------------------------------- scenario
@@ -641,6 +768,49 @@ macro_rules! shared_tests {
     };
 }
 pub(crate) use shared_tests;
+
+/// Instantiates every downsampling test for one implementation, built by
+/// `TestVoxelizer::with_params`.
+macro_rules! downsampling_tests {
+    ($ty:ty) => {
+        $crate::test::downsampling_tests!($ty, {});
+    };
+    // `$setup` runs first in every test
+    ($ty:ty, $setup:block) => {
+        $crate::test::downsampling_tests!(@each $ty, $setup;
+            downsampling_params_validated,
+            downsampling_error_keeps_params,
+            downsampling_off_by_default,
+            downsampling_single_voxel,
+            downsampling_threshold_counts_voxels,
+            downsampling_every_size,
+            downsampling_negative_coords,
+            downsampling_large_sizes_span_groups,
+            downsampling_unchanged_not_reported,
+            downsampling_flip_back_not_reported,
+            downsampling_matches_reference,
+            downsampling_enabled_late,
+            downsampling_params_change_rebuilds,
+            downsampling_add_points_before_first_get,
+            clear_downsampled_resends_all,
+            disable_downsampling_stops_tracking,
+            get_all_downsampled_does_not_change_state,
+            clear_removes_everything,
+            clear_drops_downsampled_state,
+            downsampling_does_not_change_add_points,
+        );
+    };
+    (@each $ty:ty, $setup:block; $($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                $setup
+                $crate::test::$name::<$ty>();
+            }
+        )*
+    };
+}
+pub(crate) use downsampling_tests;
 
 // ---------------------------------------------------------------- indexing
 
@@ -2450,6 +2620,390 @@ pub(crate) fn get_all_points_compressed_plain_matches_compress_mode<T: TestVoxel
     assert_eq!(plain, dump(true));
 }
 
+// ------------------------------------------------------------ downsampling
+
+pub(crate) fn downsampling_params_validated<T: TestVoxelizer>() {
+    assert_eq!(
+        plain::<T>().set_downsampling_params(4, 1),
+        Err(DownsamplingError::NotCompressed)
+    );
+    let mut v = compressed::<T>();
+    for size in [0, 1, 3, 6, 12, 255] {
+        assert_eq!(
+            v.set_downsampling_params(size, 1),
+            Err(DownsamplingError::InvalidSize(size))
+        );
+    }
+    for size in [2u8, 4, 8, 16, 32, 64, 128] {
+        let full = u32::from(size).pow(3);
+        for threshold in [0, full + 1, u32::MAX] {
+            assert_eq!(
+                v.set_downsampling_params(size, threshold),
+                Err(DownsamplingError::InvalidThreshold(threshold))
+            );
+        }
+        assert_eq!(v.set_downsampling_params(size, 1), Ok(()));
+        assert_eq!(v.set_downsampling_params(size, full), Ok(()));
+    }
+}
+
+pub(crate) fn downsampling_error_keeps_params<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    construct(&mut v, &[(5, 6, 7)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((1, 1, 1))]);
+    assert!(v.set_downsampling_params(3, 1).is_err());
+    assert!(v.set_downsampling_params(4, 0).is_err());
+    // Still edge 4, and the state was kept
+    assert!(v.get_downsampled().is_empty());
+    construct(&mut v, &[(9, 6, 7)]);
+    assert_eq!(
+        v.get_downsampled(),
+        vec![pi(0, 0, 0, block_bit(1, 1, 1) | block_bit(2, 1, 1))]
+    );
+    assert_eq!(all_downsampled(&v), vec![pi(1, 1, 1, 1), pi(2, 1, 1, 1)]);
+}
+
+pub(crate) fn downsampling_off_by_default<T: TestVoxelizer>() {
+    let mut v = compressed::<T>();
+    construct(&mut v, &[(0, 0, 0), (5, 6, 7)]);
+    assert!(v.get_downsampled().is_empty());
+    assert!(v.get_all_downsampled().is_empty());
+    let mut v = plain::<T>();
+    from_above(&mut v, (0, 0, 0), 3.0);
+    assert!(v.get_downsampled().is_empty());
+    assert!(v.get_all_downsampled().is_empty());
+}
+
+pub(crate) fn downsampling_single_voxel<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    assert!(v.get_downsampled().is_empty());
+    construct(&mut v, &[(5, 6, 7)]);
+    // D = (1, 1, 1): block (0, 0, 0), bit 1 + 4 + 16
+    assert_eq!(v.get_downsampled(), vec![pi(0, 0, 0, 1 << 21)]);
+    assert_eq!(all_downsampled(&v), vec![pi(1, 1, 1, 1)]);
+    let groups = v.get_all_downsampled();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].point, pi(0, 0, 0, 0));
+    assert_eq!(groups[0].values[0], page_bit(1, 1, 1));
+    assert!(groups[0].values[1..].iter().all(|w| *w == 0));
+    destroy(&mut v, &[(5, 6, 7)]);
+    assert_eq!(v.get_downsampled(), vec![pi(0, 0, 0, 0)]);
+    assert!(v.get_all_downsampled().is_empty());
+    assert!(v.get_downsampled().is_empty());
+}
+
+pub(crate) fn downsampling_threshold_counts_voxels<T: TestVoxelizer>() {
+    // Edge 2: the cube 2..4 x 0..2 x 0..2 is D = (1, 0, 0)
+    let mut v = downsampled::<T>(2, 3);
+    construct(&mut v, &[(2, 0, 0), (3, 1, 1)]);
+    // Only 2 of 3
+    assert!(v.get_downsampled().is_empty());
+    assert!(v.get_all_downsampled().is_empty());
+    // Outside of the cube
+    construct(&mut v, &[(4, 0, 0), (1, 1, 1)]);
+    assert!(v.get_downsampled().is_empty());
+    construct(&mut v, &[(2, 1, 0)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((1, 0, 0))]);
+    assert_eq!(all_downsampled(&v), vec![pi(1, 0, 0, 1)]);
+    construct(&mut v, &[(3, 0, 1)]);
+    // 4 of 3, still present
+    assert!(v.get_downsampled().is_empty());
+    destroy(&mut v, &[(2, 0, 0)]);
+    assert!(v.get_downsampled().is_empty());
+    destroy(&mut v, &[(3, 1, 1)]);
+    assert_eq!(v.get_downsampled(), vec![block(1, 0, 0, 0)]);
+    assert!(v.get_all_downsampled().is_empty());
+}
+
+pub(crate) fn downsampling_every_size<T: TestVoxelizer>() {
+    for shift in 1..=7 {
+        let size = 1u8 << shift;
+        let s = i32::from(size);
+        let mut v = downsampled::<T>(size, 2);
+        // Opposite corners of D = (5, 3, 1), then one voxel of D = (6, 3, 1)
+        let corners = [(5 * s, 3 * s, s), (6 * s - 1, 4 * s - 1, 2 * s - 1)];
+        construct(&mut v, &corners);
+        construct(&mut v, &[(6 * s, 3 * s, s)]);
+        assert_eq!(v.get_downsampled(), vec![ds_block((5, 3, 1))], "{size}");
+        assert_eq!(all_downsampled(&v), vec![pi(5, 3, 1, 1)], "{size}");
+        assert_eq!(all_downsampled(&v), reference_downsampled(&v, size, 2));
+        construct(&mut v, &[(7 * s - 1, 3 * s, s)]);
+        assert_eq!(
+            sorted(v.get_downsampled()),
+            vec![block(6, 3, 1, block_bit(5, 3, 1) | block_bit(6, 3, 1))],
+            "{size}"
+        );
+    }
+}
+
+pub(crate) fn downsampling_negative_coords<T: TestVoxelizer>() {
+    for size in [2, 8, 128] {
+        let mut v = downsampled::<T>(size, 1);
+        construct(&mut v, &[(-1, -1, -1), (-1, 0, -1)]);
+        assert_eq!(
+            sorted(v.get_downsampled()),
+            vec![
+                pi(-4, -4, -2, block_bit(-1, -1, -1)),
+                pi(-4, 0, -2, block_bit(-1, 0, -1)),
+            ],
+            "{size}"
+        );
+        assert_eq!(
+            all_downsampled(&v),
+            vec![pi(-1, -1, -1, 1), pi(-1, 0, -1, 1)],
+            "{size}"
+        );
+    }
+}
+
+pub(crate) fn downsampling_large_sizes_span_groups<T: TestVoxelizer>() {
+    // 64x64x64 downsampled voxels a group: D = 63 and D = 64 are in two
+    for size in [64u8, 128] {
+        let s = i32::from(size);
+        let mut v = downsampled::<T>(size, 1);
+        let voxels = [(63 * s, 0, 0), (64 * s, 0, 0), (-64 * s, 0, -1)];
+        construct(&mut v, &voxels);
+        let expected = vec![pi(-64, 0, -1, 1), pi(63, 0, 0, 1), pi(64, 0, 0, 1)];
+        assert_eq!(replay_blocks(&[v.get_downsampled()]), expected, "{size}");
+        assert_eq!(all_downsampled(&v), expected, "{size}");
+        let keys = sorted(
+            v.get_all_downsampled()
+                .into_iter()
+                .map(|g| (g.point.x, g.point.y, g.point.z))
+                .collect(),
+        );
+        assert_eq!(keys, vec![(-1, 0, -1), (0, 0, 0), (1, 0, 0)], "{size}");
+    }
+}
+
+pub(crate) fn downsampling_unchanged_not_reported<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 2);
+    construct(&mut v, &[(0, 0, 0), (1, 0, 0)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((0, 0, 0))]);
+    // More voxels in a present one, fewer in an absent one
+    construct(&mut v, &[(2, 0, 0), (8, 0, 0)]);
+    destroy(&mut v, &[(8, 0, 0)]);
+    assert!(v.get_downsampled().is_empty());
+    assert!(v.get_downsampled().is_empty());
+    assert_eq!(all_downsampled(&v), vec![pi(0, 0, 0, 1)]);
+}
+
+pub(crate) fn downsampling_flip_back_not_reported<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(2, 1);
+    construct(&mut v, &[(0, 0, 0)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((0, 0, 0))]);
+    // Gone and back, and new and gone, between two reports
+    destroy(&mut v, &[(0, 0, 0)]);
+    construct(&mut v, &[(1, 0, 0), (4, 4, 4)]);
+    destroy(&mut v, &[(4, 4, 4)]);
+    assert!(v.get_downsampled().is_empty());
+    // A change next to one that flipped back is reported with the whole block
+    destroy(&mut v, &[(1, 0, 0)]);
+    construct(&mut v, &[(0, 1, 0), (2, 0, 0)]);
+    assert_eq!(
+        v.get_downsampled(),
+        vec![pi(0, 0, 0, block_bit(0, 0, 0) | block_bit(1, 0, 0))]
+    );
+}
+
+pub(crate) fn downsampling_matches_reference<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        for size in [2, 4, 8, 16] {
+            for threshold in [1, 2, 4] {
+                let ctx = format!("{params:?}, size {size}, threshold {threshold}");
+                let mut v = T::with_params(params.clone());
+                v.set_downsampling_params(size, threshold).unwrap();
+                let mut results = Vec::new();
+                for points in workload_points() {
+                    v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+                    results.push(v.get_downsampled());
+                    let expected = reference_downsampled(&v, size, threshold);
+                    assert_eq!(replay_blocks(&results), expected, "{ctx}");
+                    assert_eq!(all_downsampled(&v), expected, "{ctx}");
+                }
+                if threshold == 1 {
+                    assert!(results.iter().all(|r| !r.is_empty()), "{ctx}");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn downsampling_enabled_late<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        let mut v = T::with_params(params.clone());
+        workload(&mut v);
+        v.set_downsampling_params(8, 2).unwrap();
+        let expected = reference_downsampled(&v, 8, 2);
+        assert!(!expected.is_empty(), "{params:?}");
+        assert_eq!(all_downsampled(&v), expected, "{params:?}");
+        assert_eq!(
+            replay_blocks(&[v.get_downsampled()]),
+            expected,
+            "{params:?}"
+        );
+        assert!(v.get_downsampled().is_empty(), "{params:?}");
+    }
+}
+
+pub(crate) fn downsampling_params_change_rebuilds<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    construct(&mut v, &[(0, 0, 0), (5, 0, 0), (9, 9, 9)]);
+    assert_eq!(
+        replay_blocks(&[v.get_downsampled()]),
+        vec![pi(0, 0, 0, 1), pi(1, 0, 0, 1), pi(2, 2, 2, 1)]
+    );
+    // Even the same params drop the state: everything is reported again
+    v.set_downsampling_params(4, 1).unwrap();
+    assert_eq!(
+        replay_blocks(&[v.get_downsampled()]),
+        vec![pi(0, 0, 0, 1), pi(1, 0, 0, 1), pi(2, 2, 2, 1)]
+    );
+    v.set_downsampling_params(8, 2).unwrap();
+    assert_eq!(v.get_downsampled(), vec![ds_block((0, 0, 0))]);
+    assert_eq!(all_downsampled(&v), vec![pi(0, 0, 0, 1)]);
+    v.set_downsampling_params(2, 1).unwrap();
+    let expected = vec![pi(0, 0, 0, 1), pi(2, 0, 0, 1), pi(4, 4, 4, 1)];
+    assert_eq!(all_downsampled(&v), expected);
+    assert_eq!(replay_blocks(&[v.get_downsampled()]), expected);
+}
+
+pub(crate) fn downsampling_add_points_before_first_get<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    construct(&mut v, &[(0, 0, 0), (4, 0, 0)]);
+    destroy(&mut v, &[(0, 0, 0)]);
+    construct(&mut v, &[(8, 0, 0)]);
+    assert_eq!(all_downsampled(&v), vec![pi(1, 0, 0, 1), pi(2, 0, 0, 1)]);
+    assert_eq!(
+        v.get_downsampled(),
+        vec![pi(0, 0, 0, block_bit(1, 0, 0) | block_bit(2, 0, 0))]
+    );
+}
+
+pub(crate) fn clear_downsampled_resends_all<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(2, 1);
+    construct(&mut v, &[(0, 0, 0), (-3, 9, 1)]);
+    let first = v.get_downsampled();
+    assert_eq!(
+        replay_blocks(std::slice::from_ref(&first)),
+        vec![pi(-2, 4, 0, 1), pi(0, 0, 0, 1)]
+    );
+    v.clear_downsampled();
+    assert_eq!(sorted(v.get_downsampled()), sorted(first));
+    v.clear_downsampled();
+    // Params kept: still edge 2
+    construct(&mut v, &[(2, 0, 0)]);
+    assert_eq!(
+        replay_blocks(&[v.get_downsampled()]),
+        vec![pi(-2, 4, 0, 1), pi(0, 0, 0, 1), pi(1, 0, 0, 1)]
+    );
+    assert!(v.get_downsampled().is_empty());
+}
+
+pub(crate) fn disable_downsampling_stops_tracking<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    construct(&mut v, &[(0, 0, 0)]);
+    v.disable_downsampling();
+    assert!(v.get_downsampled().is_empty());
+    assert!(v.get_all_downsampled().is_empty());
+    construct(&mut v, &[(4, 0, 0)]);
+    assert!(v.get_downsampled().is_empty());
+    // Disabling twice is fine
+    v.disable_downsampling();
+    v.set_downsampling_params(4, 1).unwrap();
+    assert_eq!(
+        v.get_downsampled(),
+        vec![pi(0, 0, 0, block_bit(0, 0, 0) | block_bit(1, 0, 0))]
+    );
+    // Disabled on a voxelizer without compress as well
+    let mut v = plain::<T>();
+    v.disable_downsampling();
+    assert!(v.get_downsampled().is_empty());
+}
+
+pub(crate) fn get_all_downsampled_does_not_change_state<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    construct(&mut v, &[(0, 0, 0)]);
+    // Before the state is built
+    assert_eq!(all_downsampled(&v), vec![pi(0, 0, 0, 1)]);
+    assert_eq!(all_downsampled(&v), vec![pi(0, 0, 0, 1)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((0, 0, 0))]);
+    construct(&mut v, &[(4, 0, 0)]);
+    // With changes not reported yet
+    assert_eq!(all_downsampled(&v), vec![pi(0, 0, 0, 1), pi(1, 0, 0, 1)]);
+    assert_eq!(all_downsampled(&v), vec![pi(0, 0, 0, 1), pi(1, 0, 0, 1)]);
+    assert_eq!(
+        v.get_downsampled(),
+        vec![pi(0, 0, 0, block_bit(0, 0, 0) | block_bit(1, 0, 0))]
+    );
+}
+
+pub(crate) fn clear_removes_everything<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS {
+        let mut v = T::with_params(params.clone());
+        let fresh = workload(&mut T::with_params(params.clone()));
+        workload(&mut v);
+        assert!(!v.pages().is_empty(), "{params:?}");
+        v.clear();
+        assert!(v.pages().is_empty(), "{params:?}");
+        assert!(v.get_all_points().is_empty(), "{params:?}");
+        assert!(v.get_all_points_compressed().is_empty(), "{params:?}");
+        assert_eq!(
+            v.compressed_pages(),
+            params.compress.then(Vec::new),
+            "{params:?}"
+        );
+        assert_eq!(v.pending_results(), 0, "{params:?}");
+        // Twice is fine
+        v.clear();
+        // Works like a new voxelizer
+        assert_eq!(workload(&mut v), fresh, "{params:?}");
+        let mut expected = T::with_params(params.clone());
+        workload(&mut expected);
+        assert_eq!(v.pages(), expected.pages(), "{params:?}");
+        assert_eq!(
+            v.compressed_pages(),
+            expected.compressed_pages(),
+            "{params:?}"
+        );
+    }
+}
+
+pub(crate) fn clear_drops_downsampled_state<T: TestVoxelizer>() {
+    let mut v = downsampled::<T>(4, 1);
+    construct(&mut v, &[(0, 0, 0), (4, 0, 0)]);
+    assert!(!v.get_downsampled().is_empty());
+    construct(&mut v, &[(8, 0, 0)]);
+    v.clear();
+    assert!(v.get_downsampled().is_empty());
+    assert!(v.get_all_downsampled().is_empty());
+    // Params kept
+    construct(&mut v, &[(12, 0, 0)]);
+    assert_eq!(all_downsampled(&v), vec![pi(3, 0, 0, 1)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((3, 0, 0))]);
+    // Voxels added between clear and the next get are reported
+    v.clear();
+    construct(&mut v, &[(16, 0, 0)]);
+    assert_eq!(v.get_downsampled(), vec![ds_block((4, 0, 0))]);
+}
+
+pub(crate) fn downsampling_does_not_change_add_points<T: TestVoxelizer>() {
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        let mut v = T::with_params(params.clone());
+        v.set_downsampling_params(2, 1).unwrap();
+        v.get_downsampled();
+        let mut expected = T::with_params(params.clone());
+        assert_eq!(workload(&mut v), workload(&mut expected), "{params:?}");
+        assert_eq!(v.pages(), expected.pages(), "{params:?}");
+        assert_eq!(
+            v.compressed_pages(),
+            expected.compressed_pages(),
+            "{params:?}"
+        );
+        assert_eq!(v.pending_results(), 0, "{params:?}");
+    }
+}
+
 // ---------------------------------------------------------------- scenario
 
 pub(crate) fn scenario_repeatable<T: TestVoxelizer>() {
@@ -2529,6 +3083,72 @@ fn single_and_multi_agree() {
                     &format!("{params:?}, switch = {switch:?}, threads = {threads}"),
                 );
             }
+        }
+    }
+}
+
+/// Sorted [`Voxelizer::get_downsampled`] after each call of [`workload`] and
+/// [`Voxelizer::get_all_downsampled`] at the end, sorted by key.
+#[cfg(any(
+    all(feature = "single_threaded", feature = "multi_threaded"),
+    all(feature = "single_threaded", feature = "wgpu")
+))]
+pub(crate) fn downsampled_scenario<T: TestVoxelizer>(
+    mut v: T,
+    size: u8,
+    threshold: u32,
+) -> (Vec<Vec<PointI>>, Vec<CompressedVoxelGroup>) {
+    v.set_downsampling_params(size, threshold).unwrap();
+    let results = workload_points()
+        .into_iter()
+        .map(|points| {
+            v.add_points(pf(0.5, 0.5, 0.5, 1.0), &points);
+            sorted(v.get_downsampled())
+        })
+        .collect();
+    (results, sorted_groups(v.get_all_downsampled()))
+}
+
+#[cfg(all(feature = "single_threaded", feature = "multi_threaded"))]
+#[test]
+fn single_and_multi_agree_downsampled() {
+    use crate::{MultiThreaded, SingleThreaded};
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        for (size, threshold) in [(2, 1), (8, 3), (16, 2)] {
+            let expected =
+                downsampled_scenario(SingleThreaded::new(params.clone()), size, threshold);
+            assert!(expected.0.iter().all(|r| !r.is_empty()));
+            for threads in [1, 4, 8] {
+                let got = downsampled_scenario(
+                    MultiThreaded::new(params.clone(), threads).expect("thread pool must build"),
+                    size,
+                    threshold,
+                );
+                assert_eq!(
+                    got, expected,
+                    "{params:?}, size {size}, threshold {threshold}, threads {threads}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "single_threaded", feature = "wgpu"))]
+#[test]
+fn single_and_wgpu_agree_downsampled() {
+    use crate::{SingleThreaded, WgpuAccelerated};
+    for params in SCENARIO_PARAMS.into_iter().filter(|p| p.compress) {
+        for (size, threshold) in [(2, 1), (8, 3), (16, 2)] {
+            let expected =
+                downsampled_scenario(SingleThreaded::new(params.clone()), size, threshold);
+            assert!(expected.0.iter().all(|r| !r.is_empty()));
+            let v = pollster::block_on(WgpuAccelerated::new(params.clone(), 1 << 12))
+                .expect("a GPU adapter with compute shaders is required");
+            assert_eq!(
+                downsampled_scenario(v, size, threshold),
+                expected,
+                "{params:?}, size {size}, threshold {threshold}"
+            );
         }
     }
 }

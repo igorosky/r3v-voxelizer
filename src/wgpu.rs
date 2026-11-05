@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
 use crate::{
-    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, Multipliers, POINTS_IN_VOXEL_GROUP,
-    Voxelizer, VoxelizerParams,
+    ALL_POINTS_GROUP_EDGE_BITS, CompressedVoxelGroup, DownsamplingError, Multipliers,
+    POINTS_IN_VOXEL_GROUP, Voxelizer, VoxelizerParams,
+    downsampling::Downsampling,
     geometry::{PointF, PointI, ZOrder},
 };
+
+type FxHashMap<K, V> = hashbrown::HashMap<K, V, rustc_hash::FxBuildHasher>;
 
 // Must match the shader
 const WORKGROUP_SIZE: u32 = 256;
@@ -79,6 +82,10 @@ impl Kernel {
 /// anymore are dropped. Pages whose voxels all drop to 0 during a call are
 /// removed at its end, freeing their space.
 ///
+/// Downsampling runs on the CPU, from the blocks `add_points` reads back:
+/// while it is on, a copy of the occupancy of every page holding a
+/// constructed voxel is kept in host memory (about 30 bytes a page).
+///
 /// With `R3V_VOXELIZER_DEBUG` set in the environment it prints the adapter
 /// it runs on and, in compress mode, a report of the GPU state whenever
 /// blocks come back off the 4x4x2 block grid, to stderr.
@@ -113,6 +120,18 @@ pub struct WgpuAccelerated {
     debug_reports: u32,
     /// Last counts read back, in debug mode
     recent_counts: Vec<u32>,
+    /// `None` while downsampling is off
+    downsampling: Option<WgpuDownsampling>,
+}
+
+/// Downsampling, see [`Voxelizer::set_downsampling_params`].
+#[derive(Debug)]
+struct WgpuDownsampling {
+    core: Downsampling,
+    /// Occupancy of every page holding a constructed voxel, kept from the
+    /// blocks `add_points` returns. `None` until the state of `core` is
+    /// built, together with it.
+    pages: Option<FxHashMap<(i32, i32, i32), u64>>,
 }
 
 impl Voxelizer for WgpuAccelerated {
@@ -142,6 +161,46 @@ impl Voxelizer for WgpuAccelerated {
     #[inline]
     fn multipliers(&self) -> Multipliers {
         self.multipliers
+    }
+    fn set_downsampling_params(
+        &mut self,
+        downsampled_voxel_size: u8,
+        downsampled_threshold: u32,
+    ) -> Result<(), DownsamplingError> {
+        self.downsampling = Some(WgpuDownsampling {
+            core: Downsampling::new(downsampled_voxel_size, downsampled_threshold, self.compress)?,
+            pages: None,
+        });
+        Ok(())
+    }
+    fn disable_downsampling(&mut self) {
+        self.downsampling = None;
+    }
+    /// Blocks until the GPU is done, see
+    /// [`WgpuAccelerated::get_downsampled_async`] for targets that cannot
+    /// block (the web).
+    fn get_downsampled(&mut self) -> Vec<PointI> {
+        pollster::block_on(self.get_downsampled_async())
+    }
+    /// Blocks until the GPU is done, see
+    /// [`WgpuAccelerated::get_all_downsampled_async`] for targets that cannot
+    /// block (the web).
+    fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+        pollster::block_on(self.get_all_downsampled_async())
+    }
+    /// Queues the work, it does not wait for the GPU.
+    fn clear(&mut self) {
+        let mut encoder = self.encoder();
+        encoder.clear_buffer(&self.buckets, 0, None);
+        encoder.clear_buffer(&self.voxels, 0, None);
+        self.queue.submit([encoder.finish()]);
+        self.clear_downsampled();
+    }
+    fn clear_downsampled(&mut self) {
+        if let Some(downsampling) = self.downsampling.as_mut() {
+            downsampling.core.reset();
+            downsampling.pages = None;
+        }
     }
 }
 
@@ -250,7 +309,79 @@ impl WgpuAccelerated {
                 }));
             }
         }
+        if let Some(WgpuDownsampling {
+            core,
+            pages: Some(pages),
+        }) = self.downsampling.as_mut()
+        {
+            // Compress mode: every block comes with its whole occupancy
+            for block in &result {
+                let page = (block.x >> 2, block.y >> 2, block.z >> 2);
+                let old = pages.get(&page).copied().unwrap_or(0);
+                let half = if block.z & 2 != 0 { 32 } else { 0 };
+                let new = (old & !(0xFFFF_FFFF << half)) | (u64::from(block.i) << half);
+                if new == 0 {
+                    pages.remove(&page);
+                } else {
+                    pages.insert(page, new);
+                }
+                core.word_changed(page, old, new);
+            }
+        }
         result
+    }
+
+    /// Same as [`Voxelizer::get_downsampled`], without blocking while the GPU
+    /// works. Only the first call after the downsampled state got dropped
+    /// reads the occupancy of the pages back, the others use no GPU.
+    pub async fn get_downsampled_async(&mut self) -> Vec<PointI> {
+        let Some(downsampling) = self.downsampling.as_ref() else {
+            return Vec::new();
+        };
+        let stored = if downsampling.pages.is_none() {
+            Some(self.stored_occupancy().await)
+        } else {
+            None
+        };
+        let Some(downsampling) = self.downsampling.as_mut() else {
+            unreachable!("checked above");
+        };
+        match stored {
+            Some(stored) => {
+                let pages = downsampling.pages.insert(stored.into_iter().collect());
+                downsampling
+                    .core
+                    .take_changes(|| pages.iter().map(|(&page, &word)| (page, word)))
+            }
+            None => downsampling.core.take_changes(std::iter::empty),
+        }
+    }
+
+    /// Same as [`Voxelizer::get_all_downsampled`], without blocking while the
+    /// GPU works. Reads the occupancy of the pages back unless the
+    /// downsampled state is built.
+    pub async fn get_all_downsampled_async(&self) -> Vec<CompressedVoxelGroup> {
+        let Some(downsampling) = self.downsampling.as_ref() else {
+            return Vec::new();
+        };
+        let stored = if downsampling.pages.is_none() {
+            self.stored_occupancy().await
+        } else {
+            Vec::new()
+        };
+        downsampling
+            .core
+            .all(&ZOrder::default(), || stored.into_iter())
+    }
+
+    /// Occupancy of every page holding a constructed voxel.
+    async fn stored_occupancy(&self) -> Vec<((i32, i32, i32), u64)> {
+        self.stored_pages(false)
+            .await
+            .into_iter()
+            .filter(|stored| stored.occupancy != 0)
+            .map(|stored| (stored.page, stored.occupancy))
+            .collect()
     }
 
     /// Same as [`Voxelizer::get_all_points`], without blocking while the GPU
@@ -603,6 +734,7 @@ impl WgpuAccelerated {
             adapter_info,
             debug_reports: 0,
             recent_counts: Vec::new(),
+            downsampling: None,
         })
     }
 
@@ -1305,6 +1437,7 @@ mod test {
     }
 
     crate::test::shared_tests!(WgpuAccelerated);
+    crate::test::downsampling_tests!(WgpuAccelerated);
 
     /// Mirror of the shader's `hash` for pages with non negative coordinates.
     fn bucket_of(page: Coord, bucket_count: u32) -> u32 {

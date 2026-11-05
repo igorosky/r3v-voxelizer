@@ -186,6 +186,43 @@ mod r3v_voxelizer {
         fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
             self.0.get_all_points_compressed()
         }
+        /// Turns downsampling on: one downsampled voxel stands for a cube of
+        /// `downsampled_voxel_size` ** 3 voxels and is present while at least
+        /// `downsampled_threshold` of them are constructed. Raises
+        /// `ValueError` without `compress`, for a size that is not a power of
+        /// two in 2..=128 or a threshold not in 1..=size ** 3.
+        fn set_downsampling_params(
+            &mut self,
+            downsampled_voxel_size: u8,
+            downsampled_threshold: u32,
+        ) -> pyo3::PyResult<()> {
+            self.0
+                .set_downsampling_params(downsampled_voxel_size, downsampled_threshold)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+        }
+        /// Turns downsampling off.
+        fn disable_downsampling(&mut self) {
+            self.0.disable_downsampling();
+        }
+        /// Downsampled voxels that changed since the previous call, as 4x4x2
+        /// blocks of downsampled voxels like compress mode `add_points`.
+        fn get_downsampled(&mut self) -> Vec<PointI> {
+            self.0.get_downsampled()
+        }
+        /// Every present downsampled voxel, grouped like
+        /// `get_all_points_compressed`.
+        fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_downsampled()
+        }
+        /// Removes every voxel, downsampling keeps its params.
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+        /// Drops the downsampled state, the next `get_downsampled` returns
+        /// every present block.
+        fn clear_downsampled(&mut self) {
+            self.0.clear_downsampled();
+        }
     }
 
     #[cfg(feature = "multi_threaded")]
@@ -249,6 +286,43 @@ mod r3v_voxelizer {
         /// `construct_threshold`.
         fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
             self.0.get_all_points_compressed()
+        }
+        /// Turns downsampling on: one downsampled voxel stands for a cube of
+        /// `downsampled_voxel_size` ** 3 voxels and is present while at least
+        /// `downsampled_threshold` of them are constructed. Raises
+        /// `ValueError` without `compress`, for a size that is not a power of
+        /// two in 2..=128 or a threshold not in 1..=size ** 3.
+        fn set_downsampling_params(
+            &mut self,
+            downsampled_voxel_size: u8,
+            downsampled_threshold: u32,
+        ) -> pyo3::PyResult<()> {
+            self.0
+                .set_downsampling_params(downsampled_voxel_size, downsampled_threshold)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+        }
+        /// Turns downsampling off.
+        fn disable_downsampling(&mut self) {
+            self.0.disable_downsampling();
+        }
+        /// Downsampled voxels that changed since the previous call, as 4x4x2
+        /// blocks of downsampled voxels like compress mode `add_points`.
+        fn get_downsampled(&mut self) -> Vec<PointI> {
+            self.0.get_downsampled()
+        }
+        /// Every present downsampled voxel, grouped like
+        /// `get_all_points_compressed`.
+        fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_downsampled()
+        }
+        /// Removes every voxel, downsampling keeps its params.
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+        /// Drops the downsampled state, the next `get_downsampled` returns
+        /// every present block.
+        fn clear_downsampled(&mut self) {
+            self.0.clear_downsampled();
         }
     }
 
@@ -316,6 +390,43 @@ mod r3v_voxelizer {
         /// `construct_threshold`.
         fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
             self.0.get_all_points_compressed()
+        }
+        /// Turns downsampling on: one downsampled voxel stands for a cube of
+        /// `downsampled_voxel_size` ** 3 voxels and is present while at least
+        /// `downsampled_threshold` of them are constructed. Raises
+        /// `ValueError` without `compress`, for a size that is not a power of
+        /// two in 2..=128 or a threshold not in 1..=size ** 3.
+        fn set_downsampling_params(
+            &mut self,
+            downsampled_voxel_size: u8,
+            downsampled_threshold: u32,
+        ) -> pyo3::PyResult<()> {
+            self.0
+                .set_downsampling_params(downsampled_voxel_size, downsampled_threshold)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+        }
+        /// Turns downsampling off.
+        fn disable_downsampling(&mut self) {
+            self.0.disable_downsampling();
+        }
+        /// Downsampled voxels that changed since the previous call, as 4x4x2
+        /// blocks of downsampled voxels like compress mode `add_points`.
+        fn get_downsampled(&mut self) -> Vec<PointI> {
+            self.0.get_downsampled()
+        }
+        /// Every present downsampled voxel, grouped like
+        /// `get_all_points_compressed`.
+        fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup> {
+            self.0.get_all_downsampled()
+        }
+        /// Removes every voxel, downsampling keeps its params.
+        fn clear(&mut self) {
+            self.0.clear();
+        }
+        /// Drops the downsampled state, the next `get_downsampled` returns
+        /// every present block.
+        fn clear_downsampled(&mut self) {
+            self.0.clear_downsampled();
         }
         /// GPU memory taken by the hashmap of `bucket_count` buckets, in bytes.
         #[staticmethod]

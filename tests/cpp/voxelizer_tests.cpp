@@ -175,6 +175,30 @@ void get_all_points_compressed(const Impl &impl) {
     CHECK((decode(groups) == std::vector<rv::PointI>{{5, 6, 7, 1}}));
 }
 
+void downsampling(const Impl &impl) {
+    Voxelizer v(impl, true);
+    CHECK(!rv::set_downsampling_params(v.get(), 3, 1));
+    CHECK(rv::set_downsampling_params(v.get(), 4, 1));
+    /* (3, 0, 0) is in D = (0, 0, 0) */
+    add_points(v, {{3.5f, 0.5f, 0.5f, 1.0f}});
+    const std::vector<rv::PointI> block = {{0, 0, 0, 1}};
+    CHECK(take(rv::get_downsampled(v.get())) == block);
+    CHECK(take(rv::get_downsampled(v.get())).empty());
+    CHECK(decode(rv::get_all_downsampled(v.get())) == block);
+    rv::clear_downsampled(v.get());
+    CHECK(take(rv::get_downsampled(v.get())) == block);
+    rv::disable_downsampling(v.get());
+    CHECK(take(rv::get_downsampled(v.get())).empty());
+}
+
+void clear_voxelizer(const Impl &impl) {
+    Voxelizer v(impl, false);
+    add_points(v, {{3.5f, 0.5f, 0.5f, 2.0f}});
+    rv::clear_voxelizer(v.get());
+    CHECK(take(rv::get_all_points(v.get())).empty());
+    CHECK((add_points(v, {{3.5f, 0.5f, 0.5f, 1.0f}}) == std::vector<rv::PointI>{{3, 0, 0, 1}}));
+}
+
 /* ----------------------------------------------------------- global */
 
 void voxel_group_layout(const Impl *) {
@@ -195,6 +219,12 @@ void null_voxelizer(const Impl *) {
     rv::drop_voxel_groups(groups);
     rv::Multipliers m = rv::get_multipliers(nullptr);
     CHECK(m.intensity == 0.0f && m.hit == 0 && m.target == 0);
+    CHECK(!rv::set_downsampling_params(nullptr, 4, 1));
+    rv::disable_downsampling(nullptr);
+    rv::clear_voxelizer(nullptr);
+    rv::clear_downsampled(nullptr);
+    rv::drop_update(rv::get_downsampled(nullptr));
+    rv::drop_voxel_groups(rv::get_all_downsampled(nullptr));
     rv::drop_voxelizer(nullptr);
 }
 
@@ -210,6 +240,8 @@ const TestCase TEST_CASES[] = {
     {"add_points_and_multipliers", add_points_and_multipliers, nullptr},
     {"get_all_points", get_all_points, nullptr},
     {"get_all_points_compressed", get_all_points_compressed, nullptr},
+    {"downsampling", downsampling, nullptr},
+    {"clear_voxelizer", clear_voxelizer, nullptr},
     {"voxel_group_layout", nullptr, voxel_group_layout},
     {"null_voxelizer", nullptr, null_voxelizer},
 };

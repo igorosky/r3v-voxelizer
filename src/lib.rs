@@ -1,6 +1,12 @@
 use crate::geometry::{PointF, PointI};
 
 mod bindings;
+#[cfg(any(
+    feature = "single_threaded",
+    feature = "multi_threaded",
+    feature = "wgpu"
+))]
+mod downsampling;
 pub mod geometry;
 #[cfg(feature = "multi_threaded")]
 mod multi_threaded;
@@ -25,12 +31,41 @@ pub const POINTS_IN_VOXEL_GROUP: usize = 1 << (3 * ALL_POINTS_GROUP_EDGE_BITS);
 
 pub trait Voxelizer {
     fn add_points(&mut self, sensor_pos: PointF, points: &[PointF]) -> Vec<PointI>;
-    fn get_all_points(&self) -> Vec<PointI> {
-        unimplemented!()
-    }
-    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup> {
-        unimplemented!()
-    }
+    fn get_all_points(&self) -> Vec<PointI>;
+    fn get_all_points_compressed(&self) -> Vec<CompressedVoxelGroup>;
+    /// Turns downsampling on: one downsampled voxel stands for a cube of
+    /// `downsampled_voxel_size^3` voxels (`voxel >> log2(size)`) and is
+    /// present while at least `downsampled_threshold` voxels of the cube are
+    /// constructed.
+    ///
+    /// Needs `compress`, a size that is a power of two in `2..=128` and a
+    /// threshold in `1..=size^3`. On error nothing changes. The previous
+    /// downsampled state is dropped, the next downsampling call builds it
+    /// again from the current voxels.
+    fn set_downsampling_params(
+        &mut self,
+        downsampled_voxel_size: u8,
+        downsampled_threshold: u32,
+    ) -> Result<(), DownsamplingError>;
+    /// Turns downsampling off and drops its state. Until it is turned on
+    /// again `add_points` does no downsampling work.
+    fn disable_downsampling(&mut self);
+    /// Downsampled voxels that changed since the previous call, as 4x4x2
+    /// blocks of downsampled voxels in the format of compress mode
+    /// [`Voxelizer::add_points`]. After the state got dropped (params set,
+    /// [`Voxelizer::clear_downsampled`], [`Voxelizer::clear`]) it returns every
+    /// present block. Empty while downsampling is off.
+    fn get_downsampled(&mut self) -> Vec<PointI>;
+    /// Every present downsampled voxel, grouped like
+    /// [`Voxelizer::get_all_points_compressed`] (in downsampled voxels).
+    /// Empty while downsampling is off.
+    fn get_all_downsampled(&self) -> Vec<CompressedVoxelGroup>;
+    /// Removes every voxel. Downsampling keeps its params, its state is
+    /// dropped.
+    fn clear(&mut self);
+    /// Drops the downsampled state, keeping the params. The next
+    /// [`Voxelizer::get_downsampled`] returns every present block.
+    fn clear_downsampled(&mut self);
     /// Multipliers used by the following [`Voxelizer::add_points`] calls.
     /// Voxels keep the values they got so far.
     fn set_multipliers(&mut self, multipliers: Multipliers);
@@ -59,6 +94,34 @@ pub struct Multipliers {
     /// Scales the intensity added to the voxel a ray ends in.
     pub target: u32,
 }
+
+/// Why [`Voxelizer::set_downsampling_params`] refused the params.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownsamplingError {
+    /// The voxelizer was created without `compress`
+    NotCompressed,
+    /// Not a power of two in `2..=128`
+    InvalidSize(u8),
+    /// Not in `1..=size^3`
+    InvalidThreshold(u32),
+}
+
+impl std::fmt::Display for DownsamplingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotCompressed => write!(f, "downsampling needs compress"),
+            Self::InvalidSize(size) => write!(
+                f,
+                "downsampled voxel size {size} is not a power of two in 2..=128"
+            ),
+            Self::InvalidThreshold(threshold) => {
+                write!(f, "downsampled threshold {threshold} is not in 1..=size^3")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DownsamplingError {}
 
 /// Parameters shared by every [`Voxelizer`] implementation.
 #[derive(Debug, Clone, PartialEq)]

@@ -71,7 +71,8 @@ baseline and with the previous run. Defaults in brackets.
                      same previous run (bench.sh --flamegraph passes it)
   --help             print this
 
-Columns: ms/frame is the median over reps of the mean add_points duration,
+Columns: ms/frame is the median over reps of the mean add_points duration
+(add_points and get_downsampled in the -ds cases),
 ± the median absolute deviation of the reps in percent of it (keep it below
 the changes you look for: close other programs, use a performance power
 profile, run one implementation with --impls), blocks the
@@ -97,15 +98,19 @@ struct Case {
     scenario: Scenario,
     points: usize,
     range: u32,
+    /// Edge and threshold of the downsampling, `get_downsampled` after
+    /// every `add_points`
+    downsampling: Option<(u8, u32)>,
 }
 
-const CASES: [Case; 4] = [
+const CASES: [Case; 6] = [
     // A lidar frame in a small room
     Case {
         name: "room-50k",
         scenario: Scenario::Room,
         points: 50_000,
         range: 32,
+        downsampling: None,
     },
     // Long rays
     Case {
@@ -113,6 +118,7 @@ const CASES: [Case; 4] = [
         scenario: Scenario::Room,
         points: 10_000,
         range: 256,
+        downsampling: None,
     },
     // Many rays ending on the same voxels
     Case {
@@ -120,6 +126,7 @@ const CASES: [Case; 4] = [
         scenario: Scenario::Cone,
         points: 50_000,
         range: 64,
+        downsampling: None,
     },
     // Cost of a call itself
     Case {
@@ -127,6 +134,22 @@ const CASES: [Case; 4] = [
         scenario: Scenario::Room,
         points: 1_000,
         range: 16,
+        downsampling: None,
+    },
+    // Downsampling: edge 2 (a special case on the GPU) and edge 8
+    Case {
+        name: "room-50k-ds2",
+        scenario: Scenario::Room,
+        points: 50_000,
+        range: 32,
+        downsampling: Some((2, 2)),
+    },
+    Case {
+        name: "room-50k-ds8",
+        scenario: Scenario::Room,
+        points: 50_000,
+        range: 32,
+        downsampling: Some((8, 8)),
     },
 ];
 
@@ -788,7 +811,13 @@ fn round(
         for _ in 0..job.inner {
             let start = Instant::now();
             let measured = panic::catch_unwind(AssertUnwindSafe(|| {
-                measure(job.imp, params.clone(), job.frames, WARMUP)
+                measure(
+                    job.imp,
+                    params.clone(),
+                    job.frames,
+                    WARMUP,
+                    job.case.downsampling,
+                )
             }));
             job.wall = start.elapsed();
             match measured {

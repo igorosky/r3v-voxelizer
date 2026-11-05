@@ -38,6 +38,8 @@ update what is new.
 - Compact output: with `compress` on, changes come as 32 bit occupancy masks
   of 4x4x2 voxel blocks, ready for r3v-renderer.
 - Whole map dumps, as raw values or as 64x64x64 occupancy groups.
+- Optional downsampling: a coarser map (one voxel per 2^3 up to 128^3 voxels)
+  reported in the same block format, at no cost while it is off.
 - Thresholds with hysteresis, a value cap and per call multipliers that can be
   changed at runtime.
 - Bindings for C, C++, Python and JavaScript (WebAssembly, with the GPU
@@ -195,7 +197,7 @@ is in [docs/parameters.md](docs/parameters.md).
 
 | Document | What is inside |
 |---|---|
-| [docs/parameters.md](docs/parameters.md) | Parameters, output formats, multipliers, map dumps |
+| [docs/parameters.md](docs/parameters.md) | Parameters, output formats, multipliers, map dumps, downsampling |
 | [docs/bindings.md](docs/bindings.md) | C, C++, Python and JavaScript details |
 | [docs/benchmarks.md](docs/benchmarks.md) | `bench.sh`, the quick check for optimization work, flamegraphs |
 

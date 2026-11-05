@@ -1216,6 +1216,123 @@ function once(fn, ...needs) {
     return { name: fn.name, fn, perImpl: false, needs };
 }
 
+// -------------------------------------------------------- downsampling
+
+/** Compares the decoded get_all_downsampled with [x, y, z, 1] arrays,
+ * ignoring order. */
+async function checkDownsampled(voxelizer, ...expected) {
+    const got = decodeGroups(await voxelizer.get_all_downsampled());
+    const want = [...expected].sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3]);
+    check(same(got, want), `downsampled voxels differ\n     got: ${fmt(got)}\nexpected: ${fmt(want)}`);
+}
+
+async function downsampling_params_validated(impl) {
+    await throwsError(async () => (await plain(impl)).set_downsampling_params(4, 1),
+        "set_downsampling_params without compress");
+    const v = await compressed(impl);
+    for (const size of [0, 1, 3, 6, 255, 256]) {
+        await throwsError(() => v.set_downsampling_params(size, 1), `downsampled voxel size ${size}`);
+    }
+    for (const threshold of [0, 65, U32_MAX]) {
+        await throwsError(() => v.set_downsampling_params(4, threshold), `threshold ${threshold}`);
+    }
+    v.set_downsampling_params(4, 64);
+    v.set_downsampling_params(128, 1);
+    // A refused call keeps edge 128: voxel 100 is in D = 0
+    await throwsError(() => v.set_downsampling_params(3, 1), "downsampled voxel size 3");
+    await fromAbove(v, 100, 0, 0, 1.0);
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 1));
+}
+
+async function downsampling_off_by_default(impl) {
+    const v = await compressed(impl);
+    await fromAbove(v, 5, 6, 7, 1.0);
+    await expectNoVoxels(v.get_downsampled());
+    await checkDownsampled(v);
+}
+
+async function downsampling_reports_changes(impl) {
+    const v = await compressed(impl);
+    v.set_downsampling_params(4, 1);
+    await expectNoVoxels(v.get_downsampled());
+    await fromAbove(v, 5, 6, 7, 1.0);
+    // D = (1, 1, 1): block (0, 0, 0), bit 1 + 4 + 16
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 2 ** 21));
+    await expectNoVoxels(v.get_downsampled());
+    await checkDownsampled(v, pi(1, 1, 1, 1));
+    // Destroys (5, 6, 7), constructs (70, 6, 7): D = (17, 1, 1)
+    await alongX(v, 5, 70, 6, 7, 1.0);
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 0), block(17, 1, 1, blockBit(17, 1, 1)));
+    await checkDownsampled(v, pi(17, 1, 1, 1));
+}
+
+async function downsampling_threshold(impl) {
+    // Edge 2: voxels (2, 0, 0) and (3, 1, 1) are both in D = (1, 0, 0)
+    const v = await compressed(impl);
+    v.set_downsampling_params(2, 2);
+    await fromAbove(v, 2, 0, 0, 1.0);
+    await expectNoVoxels(v.get_downsampled());
+    await fromAbove(v, 3, 1, 1, 1.0);
+    await expectVoxels(v.get_downsampled(), block(1, 0, 0, blockBit(1, 0, 0)));
+    // Destroys (2, 0, 0), constructs (9, 0, 0) alone in D = (4, 0, 0)
+    await alongX(v, 2, 9, 0, 0, 1.0);
+    await expectVoxels(v.get_downsampled(), block(1, 0, 0, 0));
+    await checkDownsampled(v);
+}
+
+async function downsampling_clear_and_disable(impl) {
+    const v = await compressed(impl);
+    v.set_downsampling_params(4, 1);
+    await fromAbove(v, 0, 0, 0, 1.0);
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 1));
+    // Everything again after the state got dropped
+    v.clear_downsampled();
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 1));
+    v.disable_downsampling();
+    await fromAbove(v, 4, 0, 0, 1.0);
+    await expectNoVoxels(v.get_downsampled());
+    await checkDownsampled(v);
+    v.set_downsampling_params(4, 1);
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 1 | 2));
+}
+
+async function clear_removes_everything(impl) {
+    let v = await plain(impl);
+    await seed(v, 1.0, 5, 6, 7, 3.0);
+    v.clear();
+    await expectNoVoxels(v.get_all_points());
+    await expectVoxels(fromAbove(v, 5, 6, 7, 1.0), pi(5, 6, 7, 1));
+
+    v = await compressed(impl);
+    v.set_downsampling_params(4, 1);
+    await fromAbove(v, 5, 6, 7, 1.0);
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 2 ** 21));
+    v.clear();
+    await expectNoVoxels(v.get_all_points());
+    await checkConstructed(v);
+    await expectNoVoxels(v.get_downsampled());
+    // Like a new voxelizer, downsampling still on
+    await expectVoxels(fromAbove(v, 5, 6, 7, 1.0), block(5, 6, 7, blockBit(5, 6, 7)));
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 2 ** 21));
+}
+
+async function wgpu_downsampling_while_running_rejects() {
+    // Like the other calls, the downsampling ones need the voxelizer
+    const v = await compressed(WGPU);
+    v.set_downsampling_params(4, 1);
+    const first = addPoint(v, sensor(), pf(3.5, 0.5, 0.5, 1.0));
+    await null;
+    await throwsError(() => v.set_downsampling_params(2, 1), "set_downsampling_params while add_points runs");
+    await throwsError(() => v.disable_downsampling(), "disable_downsampling while add_points runs");
+    await throwsError(() => v.clear(), "clear while add_points runs");
+    await throwsError(() => v.clear_downsampled(), "clear_downsampled while add_points runs");
+    await throwsError(() => v.get_downsampled(), "get_downsampled while add_points runs");
+    await throwsError(() => v.get_all_downsampled(), "get_all_downsampled while add_points runs");
+    await expectVoxels(first, pi(0, 0, 0, 2 ** 3));
+    // Nothing changed: still edge 4
+    await expectVoxels(v.get_downsampled(), pi(0, 0, 0, 1));
+}
+
 const TEST_CASES = [
     once(module_exports_match_features),
     once(point_f_constructor),
@@ -1317,6 +1434,12 @@ const TEST_CASES = [
     perImpl(get_all_points_compressed_plain_matches_compress_mode),
     perImpl(dump_matches_replayed_results),
     perImpl(scenario_repeatable),
+    perImpl(downsampling_params_validated),
+    perImpl(downsampling_off_by_default),
+    perImpl(downsampling_reports_changes),
+    perImpl(downsampling_threshold),
+    perImpl(downsampling_clear_and_disable),
+    perImpl(clear_removes_everything),
     once(single_and_wgpu_agree, "single_threaded", "wgpu"),
     once(wgpu_create_is_async, "wgpu"),
     once(wgpu_rejects_zero_buckets, "wgpu"),
@@ -1324,6 +1447,7 @@ const TEST_CASES = [
     once(wgpu_overlapping_add_points_rejects, "wgpu"),
     once(wgpu_multipliers_while_running_rejects, "wgpu"),
     once(wgpu_dump_while_running_rejects, "wgpu"),
+    once(wgpu_downsampling_while_running_rejects, "wgpu"),
     once(compress_helpers_self_check),
     once(dump_helpers_self_check),
 ];
