@@ -19,7 +19,6 @@ static_assertions = { version = "1.1.0", optional = true }
 wasm-bindgen = { version = "0.2.130", optional = true }
 wasm-bindgen-futures = { version = "0.4.80", optional = true }
 wgpu = { version = "30.0.1", optional = true }
-zorder = { version = "0.2.2", optional = true }
 
 [dev-dependencies]
 libtest-mimic = "0.8"
@@ -41,14 +40,12 @@ multi_threaded = [
     "dep:rayon",
     "dep:hashbrown",
     "dep:rustc-hash",
-    "dep:zorder",
     "dep:static_assertions",
 ]
 python = ["dep:pyo3", "dep:pyo3-build-config"]
 single_threaded = [
     "dep:hashbrown",
     "dep:rustc-hash",
-    "dep:zorder",
     "dep:static_assertions",
 ]
 wgpu = [
@@ -58,7 +55,6 @@ wgpu = [
     "dep:hashbrown",
     "dep:pollster",
     "dep:rustc-hash",
-    "dep:zorder",
 ]
 
 [[test]]
